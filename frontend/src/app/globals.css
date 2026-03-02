@@ -1,0 +1,301 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* FPL brand colors */
+  --fpl-green: #00ff87;
+  --fpl-purple: #37003c;
+  --fpl-dark: #1a1a2e;
+  --fpl-cyan: #04f5ff;
+  --fpl-pink: #e90052;
+
+  /* Dark theme (default) */
+  --background: #0f0014;
+  --foreground: #f0f0f0;
+  --card: #1a0022;
+  --card-foreground: #f0f0f0;
+  --primary: #00ff87;
+  --primary-foreground: #0f0014;
+  --secondary: #37003c;
+  --secondary-foreground: #f0f0f0;
+  --muted: #2d0038;
+  --muted-foreground: #a0a0a0;
+  --accent: #04f5ff;
+  --accent-foreground: #0f0014;
+  --border: #3d0050;
+  --radius: 0.5rem;
+
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-[var(--background)] text-[var(--foreground)] antialiased;
+    font-family: var(--font-sans);
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-bold tracking-tight;
+  }
+}
+
+@layer components {
+  .fpl-card {
+    @apply rounded-lg border border-[var(--border)] bg-[var(--card)] p-6 shadow-lg transition-shadow hover:shadow-xl;
+  }
+
+  .fpl-badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+
+  .fpl-badge-gkp {
+    @apply bg-yellow-500/20 text-yellow-400;
+  }
+
+  .fpl-badge-def {
+    @apply bg-green-500/20 text-green-400;
+  }
+
+  .fpl-badge-mid {
+    @apply bg-blue-500/20 text-blue-400;
+  }
+
+  .fpl-badge-fwd {
+    @apply bg-red-500/20 text-red-400;
+  }
+
+  .fpl-gradient-text {
+    @apply bg-gradient-to-r from-[#00ff87] to-[#04f5ff] bg-clip-text text-transparent;
+  }
+
+  .fpl-gradient-bg {
+    @apply bg-gradient-to-br from-[#37003c] to-[#2d0038];
+  }
+
+  .fpl-button {
+    @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
+           transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[var(--primary)] focus:ring-offset-2
+           focus:ring-offset-[var(--background)] disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .fpl-button-primary {
+    @apply fpl-button bg-[var(--primary)] text-[var(--primary-foreground)]
+           hover:shadow-[0_0_20px_rgba(0,255,135,0.3)];
+  }
+  .fpl-button-primary:hover {
+    background-color: color-mix(in srgb, var(--primary) 90%, transparent);
+  }
+
+  .fpl-button-secondary {
+    @apply fpl-button bg-[var(--secondary)] text-[var(--secondary-foreground)];
+  }
+  .fpl-button-secondary:hover {
+    background-color: color-mix(in srgb, var(--secondary) 80%, transparent);
+  }
+
+  .fpl-button-outline {
+    @apply fpl-button border border-[var(--border)] bg-transparent text-[var(--foreground)]
+           hover:bg-[var(--muted)] hover:text-[var(--foreground)];
+  }
+
+  .fpl-input {
+    @apply w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm
+           text-[var(--foreground)] placeholder-[var(--muted-foreground)]
+           focus:border-[var(--primary)] focus:outline-none focus:ring-1 focus:ring-[var(--primary)]
+           transition-colors;
+  }
+
+  .fpl-select {
+    @apply fpl-input appearance-none cursor-pointer;
+  }
+
+  .fpl-table {
+    @apply w-full text-sm;
+  }
+
+  .fpl-table thead {
+    @apply border-b border-[var(--border)];
+  }
+
+  .fpl-table th {
+    @apply px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)] cursor-pointer
+           hover:text-[var(--foreground)] transition-colors select-none;
+  }
+
+  .fpl-table td {
+    @apply px-4 py-3 whitespace-nowrap;
+  }
+
+  .fpl-table tbody tr {
+    @apply border-b transition-colors;
+    border-color: color-mix(in srgb, var(--border) 50%, transparent);
+  }
+  .fpl-table tbody tr:hover {
+    background-color: color-mix(in srgb, var(--muted) 30%, transparent);
+  }
+
+  /* Sensitivity badges */
+  .badge-strong {
+    @apply bg-emerald-500/20 text-emerald-400 border border-emerald-500/30;
+  }
+
+  .badge-moderate {
+    @apply bg-amber-500/20 text-amber-400 border border-amber-500/30;
+  }
+
+  .badge-volatile {
+    @apply bg-red-500/20 text-red-400 border border-red-500/30;
+  }
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInScale {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 5px rgba(0, 255, 135, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(0, 255, 135, 0.4); }
+}
+
+@keyframes pulse-optimize {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(0, 255, 135, 0.3);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(0, 255, 135, 0.5);
+    transform: scale(1.02);
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(100%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes playerAppear {
+  from { opacity: 0; transform: translateY(12px) scale(0.9); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slideOutRight {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.5s ease-out forwards;
+}
+
+.animate-fade-in-scale {
+  animation: fadeInScale 0.3s ease-out forwards;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-pulse-optimize {
+  animation: pulse-optimize 2s ease-in-out infinite;
+}
+
+.animate-toast-in {
+  animation: toastIn 0.3s ease-out forwards;
+}
+
+.animate-player-appear {
+  animation: playerAppear 0.4s ease-out forwards;
+}
+
+.animate-slide-in-right {
+  animation: slideInRight 0.3s ease-out forwards;
+}
+
+.animate-slide-out-right {
+  animation: slideOutRight 0.3s ease-in forwards;
+}
+
+/* Stagger children animation */
+.stagger-children > * {
+  opacity: 0;
+  animation: fadeInUp 0.4s ease-out forwards;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0.05s; }
+.stagger-children > *:nth-child(2) { animation-delay: 0.1s; }
+.stagger-children > *:nth-child(3) { animation-delay: 0.15s; }
+.stagger-children > *:nth-child(4) { animation-delay: 0.2s; }
+.stagger-children > *:nth-child(5) { animation-delay: 0.25s; }
+.stagger-children > *:nth-child(6) { animation-delay: 0.3s; }
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--muted) 25%,
+    var(--border) 50%,
+    var(--muted) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius);
+}
+
+/* Hover lift effect for interactive cards */
+.hover-lift {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+}
+
+/* Smooth tab/filter transitions */
+.tab-transition {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
