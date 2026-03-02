@@ -13,6 +13,8 @@ python-dotenv
 shap
 deap
 aiofiles
+google-generativeai
+python-multipart
 pytest
 pytest-asyncio
 ruff

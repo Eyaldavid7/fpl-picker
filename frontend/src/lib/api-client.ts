@@ -51,14 +51,6 @@ export const api = {
   getGameweeks: () => apiClient.get("/data/gameweeks"),
   refreshData: () => apiClient.post("/data/refresh"),
 
-  // Predictions
-  predictPoints: (data: { player_ids?: number[]; gameweeks: number[]; model?: string }) =>
-    apiClient.post("/predict/points", data),
-  getPlayerPredictions: (id: number) => apiClient.get(`/predict/players/${id}`),
-  batchPredict: (data: { gameweeks: number[]; model?: string }) =>
-    apiClient.post("/predict/batch", data),
-  getModels: () => apiClient.get("/predict/models"),
-
   // Optimization
   optimizeSquad: (data: Record<string, unknown>) =>
     apiClient.post("/optimize/squad", data),
@@ -67,17 +59,27 @@ export const api = {
   optimizeBench: (data: { xi_ids: number[]; bench_ids: number[]; gameweek: number }) =>
     apiClient.post("/optimize/bench", data),
 
-  // Transfers
-  recommendTransfers: (data: Record<string, unknown>) =>
-    apiClient.post("/transfers/recommend", data),
-  planTransfers: (data: Record<string, unknown>) =>
-    apiClient.post("/transfers/plan", data),
-  evaluateTransfers: (data: Record<string, unknown>) =>
-    apiClient.post("/transfers/evaluate", data),
+  // Fixtures Analysis
+  getSquadFixtures: (data: { player_ids: number[]; num_gameweeks?: number }) =>
+    apiClient.post("/fixtures/squad-fixtures", data),
 
-  // Chips
-  chipStrategy: (data: Record<string, unknown>) =>
-    apiClient.post("/chips/strategy", data),
-  simulateChip: (data: Record<string, unknown>) =>
-    apiClient.post("/chips/simulate", data),
+  // Suggestions
+  getSubstituteSuggestions: (data: { squad_player_ids: number[]; formation?: string }) =>
+    apiClient.post("/suggestions/substitutes", data),
+  getTransferSuggestions: (data: {
+    squad_player_ids: number[];
+    budget_remaining?: number;
+    free_transfers?: number;
+  }) => apiClient.post("/suggestions/transfers", data),
+
+  // Squad Import
+  importScreenshot: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiClient.post("/squad-import/screenshot", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 60000,
+    });
+  },
+
 };

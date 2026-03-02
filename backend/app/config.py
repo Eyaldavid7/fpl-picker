@@ -29,8 +29,14 @@ class Settings(BaseSettings):
     cache_live_ttl: int = 60  # 60 seconds
     cache_predictions_ttl: int = 3600  # 1 hour
 
+    # Gemini Vision API
+    gemini_api_key: str = ""
+
     # CORS
-    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
 
     model_config = {"env_file": ".env", "env_prefix": "FPL_"}
 

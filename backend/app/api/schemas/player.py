@@ -11,6 +11,7 @@ class PlayerSummary(BaseModel):
     first_name: str = ""
     second_name: str = ""
     team: int = 0
+    team_id: int = 0
     position: str = ""  # GKP, DEF, MID, FWD
     now_cost: int = 0  # price * 10
     total_points: int = 0

@@ -10,14 +10,8 @@ export type Position = "GKP" | "DEF" | "MID" | "FWD";
 /** Player availability status */
 export type PlayerStatus = "a" | "d" | "i" | "s" | "u";
 
-/** Chip types available in FPL */
-export type ChipType = "wildcard" | "triple_captain" | "bench_boost" | "free_hit";
-
 /** Optimization method */
 export type OptimizationMethod = "ilp" | "ga";
-
-/** Sensitivity level */
-export type SensitivityLevel = "strong" | "moderate" | "volatile";
 
 /** Sort direction */
 export type SortDirection = "asc" | "desc";
@@ -168,7 +162,7 @@ export interface OptimizationRequest {
   method: OptimizationMethod;
   gameweek?: number;
   excluded_players?: number[];
-  included_players?: number[];
+  locked_players?: number[];
   existing_squad?: number[];
   max_players_per_team?: number;
   objective?: string;
@@ -188,100 +182,115 @@ export interface OptimizationResult {
   solve_time_ms?: number;
 }
 
-// ---------- Predictions ----------
+// ---------- Screenshot Import ----------
 
-/** Point prediction for a player in a gameweek. */
-export interface Prediction {
-  player_id: number;
-  player_name?: string;
-  gameweek: number;
-  predicted_points: number;
-  confidence_lower: number;
-  confidence_upper: number;
-  model: string;
-}
-
-/** Result from batch prediction. */
-export interface PredictionResult {
-  predictions: Prediction[];
-  gameweek: number;
-  model: string;
-  timestamp?: string;
-}
-
-/** Comparison of models. */
-export interface ModelComparison {
-  model: string;
-  mae: number;
-  rmse: number;
-  r2: number;
-  accuracy_within_1: number;
-  accuracy_within_2: number;
-}
-
-/** Available prediction model info. */
-export interface ModelInfo {
-  name: string;
-  display_name: string;
-  description: string;
-  type: string;
-}
-
-// ---------- Transfers ----------
-
-/** Transfer recommendation. */
-export interface TransferMove {
-  player_in_id: number;
-  player_out_id: number;
-  player_in_name: string;
-  player_out_name: string;
-  player_in_position?: Position;
-  player_out_position?: Position;
-  player_in_team?: string;
-  player_out_team?: string;
-  cost_delta: number;
-  expected_point_gain: number;
-  priority?: number;
-}
-
-/** Complete transfer plan. */
-export interface TransferPlan {
-  transfers: TransferMove[];
-  total_cost: number;
-  total_expected_gain: number;
-  free_transfers_used: number;
-  hits_taken: number;
-  net_expected_gain: number;
-  horizon_gameweeks: number;
-}
-
-// ---------- Chips ----------
-
-/** Chip recommendation. */
-export interface ChipRecommendation {
-  chip: ChipType;
-  recommended_gameweek: number;
-  expected_gain: number;
-  reasoning: string;
+/** A player matched from a screenshot import. */
+export interface MatchedPlayer {
+  extracted_name: string;
+  player_id: number | null;
+  web_name: string | null;
+  position: Position | null;
+  team_name: string | null;
   confidence: number;
 }
 
-/** Chip strategy response. */
-export interface ChipStrategy {
-  recommendations: ChipRecommendation[];
-  chips_available: ChipType[];
-  chips_used: ChipType[];
+/** Response from the screenshot import endpoint. */
+export interface ScreenshotImportResult {
+  players: MatchedPlayer[];
+  extracted_count: number;
+  matched_count: number;
+}
+
+// ---------- Squad Fixtures (Next-Opponent) ----------
+
+/** A single upcoming fixture for a player in the squad. */
+export interface PlayerFixture {
+  gameweek: number;
+  opponent_team_id: number;
+  opponent_name: string;
+  opponent_short_name: string;
+  is_home: boolean;
+  difficulty: number;
+  kickoff_time: string | null;
+}
+
+/** Team info entry in the squad fixtures response. */
+export interface FixtureTeamInfo {
+  name: string;
+  short_name: string;
+}
+
+/** Response from the squad-fixtures endpoint. */
+export interface SquadFixturesResponse {
+  fixtures: Record<string, PlayerFixture[]>;
+  teams: Record<string, FixtureTeamInfo>;
   current_gameweek: number;
 }
 
-// ---------- Sensitivity ----------
+/** Request payload for the squad-fixtures endpoint. */
+export interface SquadFixturesRequest {
+  player_ids: number[];
+  num_gameweeks?: number;
+}
 
-/** Sensitivity analysis for a recommendation. */
-export interface SensitivityAnalysis {
-  level: SensitivityLevel;
-  variance: number;
-  factors: string[];
-  description: string;
+// ---------- Suggestions ----------
+
+/** A single substitute swap recommendation. */
+export interface SubstituteSuggestion {
+  bench_player_id: number;
+  bench_player_name: string;
+  bench_player_position: Position;
+  bench_predicted_points: number;
+  starter_player_id: number;
+  starter_player_name: string;
+  starter_player_position: Position;
+  starter_predicted_points: number;
+  point_gain: number;
+  reason: string;
+}
+
+/** Request payload for the substitutes endpoint. */
+export interface SubstituteRequest {
+  squad_player_ids: number[];
+  formation?: string;
+}
+
+/** Response from the substitutes endpoint. */
+export interface SubstituteResponse {
+  suggestions: SubstituteSuggestion[];
+}
+
+/** A single transfer-in / transfer-out recommendation. */
+export interface TransferSuggestion {
+  player_out_id: number;
+  player_out_name: string;
+  player_out_position: Position;
+  player_out_price: number;
+  player_out_predicted: number;
+  player_in_id: number;
+  player_in_name: string;
+  player_in_position: Position;
+  player_in_price: number;
+  player_in_predicted: number;
+  player_in_team: string;
+  point_gain: number;
+  net_cost: number;
+  reason: string;
+}
+
+/** Request payload for the transfers endpoint. */
+export interface TransferRequest {
+  squad_player_ids: number[];
+  budget_remaining?: number;
+  free_transfers?: number;
+}
+
+/** Response from the transfers endpoint. */
+export interface TransferResponse {
+  suggestions: TransferSuggestion[];
+  total_point_gain: number;
+  total_cost_change: number;
+  transfers_used: number;
 }
 
 // ---------- API Responses ----------

@@ -10,10 +10,13 @@ import type {
   Fixture,
   OptimizationRequest,
   OptimizationResult,
-  PredictionResult,
-  TransferPlan,
-  ChipStrategy,
-  ModelInfo,
+  ScreenshotImportResult,
+  SquadFixturesRequest,
+  SquadFixturesResponse,
+  SubstituteRequest,
+  SubstituteResponse,
+  TransferRequest,
+  TransferResponse,
 } from "@/types";
 
 // ---------- Query Keys ----------
@@ -24,7 +27,6 @@ export const queryKeys = {
   teams: ["teams"] as const,
   gameweeks: ["gameweeks"] as const,
   fixtures: (gw?: number) => ["fixtures", gw] as const,
-  models: ["models"] as const,
 };
 
 // ---------- Data Hooks ----------
@@ -35,8 +37,8 @@ export function usePlayers(params?: Record<string, unknown>) {
     queryKey: [...queryKeys.players, params],
     queryFn: async () => {
       const res = await api.getPlayers(params);
-      // Handle both paginated { data: [...] } and raw array responses
-      return Array.isArray(res.data) ? res.data : res.data?.data ?? [];
+      // Backend returns { players: [...], total, page, limit }
+      return Array.isArray(res.data) ? res.data : res.data?.players ?? [];
     },
   });
 }
@@ -60,7 +62,8 @@ export function useTeams() {
     queryKey: queryKeys.teams,
     queryFn: async () => {
       const res = await api.getTeams();
-      return Array.isArray(res.data) ? res.data : res.data?.data ?? [];
+      // Backend returns { teams: [...] }
+      return Array.isArray(res.data) ? res.data : res.data?.teams ?? [];
     },
   });
 }
@@ -71,7 +74,8 @@ export function useGameweeks() {
     queryKey: queryKeys.gameweeks,
     queryFn: async () => {
       const res = await api.getGameweeks();
-      return Array.isArray(res.data) ? res.data : res.data?.data ?? [];
+      // Backend returns { gameweeks: [...] }
+      return Array.isArray(res.data) ? res.data : res.data?.gameweeks ?? [];
     },
   });
 }
@@ -82,18 +86,8 @@ export function useFixtures(gameweek?: number) {
     queryKey: queryKeys.fixtures(gameweek),
     queryFn: async () => {
       const res = await api.getFixtures(gameweek);
-      return Array.isArray(res.data) ? res.data : res.data?.data ?? [];
-    },
-  });
-}
-
-/** Fetch available prediction models. */
-export function useModels() {
-  return useQuery<ModelInfo[]>({
-    queryKey: queryKeys.models,
-    queryFn: async () => {
-      const res = await api.getModels();
-      return Array.isArray(res.data) ? res.data : res.data?.data ?? [];
+      // Backend returns { fixtures: [...] }
+      return Array.isArray(res.data) ? res.data : res.data?.fixtures ?? [];
     },
   });
 }
@@ -128,51 +122,41 @@ export function useOptimize() {
   });
 }
 
-/** Predict points for given gameweeks. */
-export function usePredictions() {
-  return useMutation<PredictionResult, Error, { player_ids?: number[]; gameweeks: number[]; model?: string }>({
-    mutationFn: async (params) => {
-      const res = await api.predictPoints(params);
+/** Import squad from a screenshot. */
+export function useScreenshotImport() {
+  return useMutation<ScreenshotImportResult, Error, File>({
+    mutationFn: async (file) => {
+      const res = await api.importScreenshot(file);
       return res.data;
     },
   });
 }
 
-/** Batch predict all players. */
-export function useBatchPredict() {
-  return useMutation<PredictionResult, Error, { gameweeks: number[]; model?: string }>({
+/** Fetch upcoming fixtures for a list of squad player IDs. */
+export function useSquadFixtures() {
+  return useMutation<SquadFixturesResponse, Error, SquadFixturesRequest>({
     mutationFn: async (params) => {
-      const res = await api.batchPredict(params);
+      const res = await api.getSquadFixtures(params);
       return res.data;
     },
   });
 }
 
-/** Plan transfers. */
-export function useTransferPlan() {
-  return useMutation<TransferPlan, Error, Record<string, unknown>>({
+/** Get substitute suggestions for a squad. */
+export function useSubstituteSuggestions() {
+  return useMutation<SubstituteResponse, Error, SubstituteRequest>({
     mutationFn: async (params) => {
-      const res = await api.planTransfers(params);
+      const res = await api.getSubstituteSuggestions(params);
       return res.data;
     },
   });
 }
 
-/** Get transfer recommendations. */
-export function useTransferRecommendations() {
-  return useMutation<TransferPlan, Error, Record<string, unknown>>({
+/** Get transfer suggestions for a squad. */
+export function useTransferSuggestions() {
+  return useMutation<TransferResponse, Error, TransferRequest>({
     mutationFn: async (params) => {
-      const res = await api.recommendTransfers(params);
-      return res.data;
-    },
-  });
-}
-
-/** Get chip strategy. */
-export function useChipStrategy() {
-  return useMutation<ChipStrategy, Error, Record<string, unknown>>({
-    mutationFn: async (params) => {
-      const res = await api.chipStrategy(params);
+      const res = await api.getTransferSuggestions(params);
       return res.data;
     },
   });

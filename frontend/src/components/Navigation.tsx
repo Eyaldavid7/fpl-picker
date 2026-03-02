@@ -5,9 +5,6 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   Cpu,
-  Users,
-  TrendingUp,
-  ArrowLeftRight,
   Menu,
   X,
 } from "lucide-react";
@@ -16,9 +13,6 @@ import { useState, useEffect, useCallback } from "react";
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/optimizer", label: "Optimizer", icon: Cpu },
-  { href: "/players", label: "Players", icon: Users },
-  { href: "/predictions", label: "Predictions", icon: TrendingUp },
-  { href: "/transfers", label: "Transfers", icon: ArrowLeftRight },
 ];
 
 export default function Navigation() {

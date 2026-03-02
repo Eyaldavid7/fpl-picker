@@ -7,9 +7,6 @@ import {
   DollarSign,
   Zap,
   Cpu,
-  ArrowLeftRight,
-  BarChart3,
-  Users,
   RefreshCw,
 } from "lucide-react";
 import StatsCard from "@/components/StatsCard";
@@ -51,8 +48,7 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-3xl font-bold fpl-gradient-text">Dashboard</h1>
           <p className="mt-1 text-[var(--muted-foreground)]">
-            Your FPL command center - predictions, optimization, and strategy
-            at a glance
+            Your FPL command center - manage your squad and plan your next moves
           </p>
         </div>
         <button
@@ -111,19 +107,11 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Top picks */}
         <div className="fpl-card lg:col-span-2">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Top Predicted Picks</h2>
-              <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-                Highest predicted point scorers for the next gameweek
-              </p>
-            </div>
-            <Link
-              href="/players"
-              className="text-sm text-[var(--primary)] hover:underline"
-            >
-              View all
-            </Link>
+          <div>
+            <h2 className="text-lg font-semibold">Top Predicted Picks</h2>
+            <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+              Highest predicted point scorers for the next gameweek
+            </p>
           </div>
 
           {playersLoading ? (
@@ -167,27 +155,6 @@ export default function DashboardPage() {
               <Cpu className="h-4 w-4" />
               Optimize Squad
             </Link>
-            <Link
-              href="/predictions"
-              className="fpl-button-secondary w-full justify-start gap-3"
-            >
-              <BarChart3 className="h-4 w-4" />
-              View Predictions
-            </Link>
-            <Link
-              href="/transfers"
-              className="fpl-button-secondary w-full justify-start gap-3"
-            >
-              <ArrowLeftRight className="h-4 w-4" />
-              Plan Transfers
-            </Link>
-            <Link
-              href="/players"
-              className="fpl-button-secondary w-full justify-start gap-3"
-            >
-              <Users className="h-4 w-4" />
-              Explore Players
-            </Link>
           </div>
         </div>
       </div>
@@ -205,7 +172,7 @@ export default function DashboardPage() {
         <div className="mt-4 text-sm text-[var(--muted-foreground)]">
           {playersError
             ? "Connect to the backend to see fixture data."
-            : "Select a player or team from the Players page to view their fixture schedule."}
+            : "Import your squad on the Optimizer page to see your personalized fixture schedule."}
         </div>
       </div>
     </div>

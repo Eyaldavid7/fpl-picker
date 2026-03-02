@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Cpu,
   DollarSign,
@@ -9,12 +9,28 @@ import {
   Users,
   Loader2,
   AlertCircle,
+  Upload,
+  Camera,
+  CheckCircle2,
 } from "lucide-react";
 import PitchView from "@/components/PitchView";
 import PlayerCard from "@/components/PlayerCard";
 import StatsCard from "@/components/StatsCard";
-import { useOptimize } from "@/hooks/useApi";
-import type { OptimizationMethod, OptimizationResult } from "@/types";
+import FDRBadge from "@/components/FDRBadge";
+import UpcomingFixtures from "@/components/UpcomingFixtures";
+import TeamSuggestions from "@/components/TeamSuggestions";
+import {
+  useOptimize,
+  useScreenshotImport,
+  useSquadFixtures,
+  useSubstituteSuggestions,
+  useTransferSuggestions,
+} from "@/hooks/useApi";
+import type {
+  OptimizationMethod,
+  OptimizationResult,
+  MatchedPlayer,
+} from "@/types";
 
 const formations = [
   "3-4-3",
@@ -26,22 +42,112 @@ const formations = [
   "5-4-1",
 ];
 
+function confidenceColor(confidence: number): string {
+  if (confidence >= 0.7) return "text-green-400";
+  if (confidence >= 0.4) return "text-amber-400";
+  return "text-red-400";
+}
+
+function confidenceBg(confidence: number): string {
+  if (confidence >= 0.7) return "bg-green-500/10 border-green-500/30";
+  if (confidence >= 0.4) return "bg-amber-500/10 border-amber-500/30";
+  return "bg-red-500/10 border-red-500/30";
+}
+
 export default function OptimizerPage() {
   const [budget, setBudget] = useState(100);
   const [formation, setFormation] = useState("4-4-2");
   const [method, setMethod] = useState<OptimizationMethod>("ilp");
+  const [importedPlayerIds, setImportedPlayerIds] = useState<number[]>([]);
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const optimize = useOptimize();
+  const screenshotImport = useScreenshotImport();
+  const squadFixtures = useSquadFixtures();
+  const substituteSuggestions = useSubstituteSuggestions();
+  const transferSuggestions = useTransferSuggestions();
 
   const handleOptimize = () => {
     optimize.mutate({
       budget: budget * 10, // Backend expects price * 10
       formation,
       method,
+      ...(importedPlayerIds.length > 0 && { locked_players: importedPlayerIds }),
     });
   };
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    screenshotImport.mutate(file);
+    // Reset input so re-uploading the same file triggers onChange
+    e.target.value = "";
+  };
+
+  const handleUseImportedSquad = () => {
+    if (!screenshotImport.data) return;
+    const ids = screenshotImport.data.players
+      .filter((p: MatchedPlayer) => p.player_id !== null)
+      .map((p: MatchedPlayer) => p.player_id as number);
+    setImportedPlayerIds(ids);
+  };
+
   const result: OptimizationResult | undefined = optimize.data;
+
+  // Auto-fetch squad fixtures when optimization result arrives
+  useEffect(() => {
+    if (optimize.data?.squad?.length) {
+      const playerIds = optimize.data.squad.map((p) => p.player_id);
+      squadFixtures.mutate({ player_ids: playerIds });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [optimize.data]);
+
+  // Auto-fetch squad fixtures when imported squad is loaded
+  useEffect(() => {
+    if (importedPlayerIds.length > 0) {
+      squadFixtures.mutate({ player_ids: importedPlayerIds });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importedPlayerIds]);
+
+  // Auto-fetch substitute suggestions when optimization result arrives
+  useEffect(() => {
+    if (optimize.data?.squad?.length) {
+      const playerIds = optimize.data.squad.map((p) => p.player_id);
+      substituteSuggestions.mutate({
+        squad_player_ids: playerIds,
+        formation: optimize.data.formation,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [optimize.data]);
+
+  // Auto-fetch substitute suggestions when imported player IDs change
+  useEffect(() => {
+    if (importedPlayerIds.length > 0) {
+      substituteSuggestions.mutate({
+        squad_player_ids: importedPlayerIds,
+        formation,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importedPlayerIds]);
+
+  const handleFetchTransfers = (budgetRemaining: number, freeTransfers: number) => {
+    const playerIds =
+      optimize.data?.squad?.map((p) => p.player_id) ??
+      (importedPlayerIds.length > 0 ? importedPlayerIds : []);
+    if (playerIds.length === 0) return;
+    transferSuggestions.mutate({
+      squad_player_ids: playerIds,
+      budget_remaining: budgetRemaining,
+      free_transfers: freeTransfers,
+    });
+  };
+
+  const hasSquadData =
+    (optimize.data?.squad?.length ?? 0) > 0 || importedPlayerIds.length > 0;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -139,6 +245,119 @@ export default function OptimizerPage() {
         </div>
       </div>
 
+      {/* Import squad from screenshot */}
+      <div className="fpl-card">
+        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <Camera className="h-5 w-5 text-[var(--primary)]" />
+          Import Your Squad
+        </h2>
+        <p className="text-sm text-[var(--muted-foreground)] mb-4">
+          Upload a screenshot of your FPL team and we&apos;ll detect your players automatically.
+        </p>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={screenshotImport.isPending}
+          className="fpl-button-primary gap-2"
+        >
+          {screenshotImport.isPending ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Analyzing Screenshot...
+            </>
+          ) : (
+            <>
+              <Upload className="h-4 w-4" />
+              Upload Screenshot
+            </>
+          )}
+        </button>
+
+        {/* Import error */}
+        {screenshotImport.isError && (
+          <div className="mt-4 p-3 rounded-lg bg-red-500/5 border border-red-500/30 text-red-400 text-sm flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+            <span>
+              {screenshotImport.error?.message || "Failed to import screenshot. Please try again."}
+            </span>
+          </div>
+        )}
+
+        {/* Matched players grid */}
+        {screenshotImport.data && !screenshotImport.isPending && (
+          <div className="mt-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-[var(--muted-foreground)]">
+                Matched {screenshotImport.data.matched_count} of{" "}
+                {screenshotImport.data.extracted_count} detected players
+              </p>
+              {importedPlayerIds.length > 0 && (
+                <span className="text-xs text-green-400 flex items-center gap-1">
+                  <CheckCircle2 className="h-3 w-3" />
+                  Squad loaded
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {screenshotImport.data.players.map((player: MatchedPlayer, idx: number) => (
+                <div
+                  key={idx}
+                  className={`rounded-lg border p-3 ${confidenceBg(player.confidence)}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-medium text-sm">
+                        {player.web_name || player.extracted_name}
+                      </p>
+                      {player.web_name && player.web_name !== player.extracted_name && (
+                        <p className="text-xs text-[var(--muted-foreground)]">
+                          from &quot;{player.extracted_name}&quot;
+                        </p>
+                      )}
+                      <div className="flex items-center gap-2 mt-1">
+                        {player.position && (
+                          <span
+                            className={`fpl-badge fpl-badge-${player.position.toLowerCase()} text-xs`}
+                          >
+                            {player.position}
+                          </span>
+                        )}
+                        {player.team_name && (
+                          <span className="text-xs text-[var(--muted-foreground)]">
+                            {player.team_name}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <span className={`text-sm font-bold ${confidenceColor(player.confidence)}`}>
+                      {Math.round(player.confidence * 100)}%
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={handleUseImportedSquad}
+              disabled={screenshotImport.data.matched_count === 0}
+              className="fpl-button-primary gap-2 w-full sm:w-auto"
+            >
+              <Cpu className="h-4 w-4" />
+              Optimize with This Squad
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* Error state */}
       {optimize.isError && (
         <div className="fpl-card border-red-500/30 bg-red-500/5">
@@ -224,7 +443,7 @@ export default function OptimizerPage() {
           <div className="fpl-card">
             <h2 className="text-lg font-semibold mb-4">Bench</h2>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              {result.bench.map((player, idx) => (
+              {result.bench.map((player) => (
                 <PlayerCard
                   key={player.player_id}
                   name={player.web_name}
@@ -255,6 +474,7 @@ export default function OptimizerPage() {
                     <th>Cost</th>
                     <th>Predicted</th>
                     <th>Role</th>
+                    <th>Next</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -301,13 +521,55 @@ export default function OptimizerPage() {
                             </span>
                           )}
                         </td>
+                        <td>
+                          {(() => {
+                            const pFixtures =
+                              squadFixtures.data?.fixtures[
+                                String(player.player_id)
+                              ];
+                            const next = pFixtures?.[0];
+                            if (!next) {
+                              return (
+                                <span className="text-sm text-[var(--muted-foreground)]">
+                                  --
+                                </span>
+                              );
+                            }
+                            return (
+                              <FDRBadge
+                                difficulty={next.difficulty}
+                                opponentShortName={next.opponent_short_name}
+                                isHome={next.is_home}
+                                compact
+                              />
+                            );
+                          })()}
+                        </td>
                       </tr>
                     ))}
                 </tbody>
               </table>
             </div>
           </div>
+
+          {/* Upcoming Fixtures ticker */}
+          <UpcomingFixtures
+            fixturesData={squadFixtures.data}
+            squad={result.squad}
+            loading={squadFixtures.isPending}
+          />
         </>
+      )}
+
+      {/* Team Suggestions - shown when squad data is available */}
+      {hasSquadData && (
+        <TeamSuggestions
+          substituteSuggestions={substituteSuggestions.data}
+          transferSuggestions={transferSuggestions.data}
+          subsLoading={substituteSuggestions.isPending}
+          transfersLoading={transferSuggestions.isPending}
+          onFetchTransfers={handleFetchTransfers}
+        />
       )}
 
       {/* Empty state */}

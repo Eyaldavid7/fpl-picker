@@ -35,6 +35,7 @@ def _player_to_summary(player: Player) -> dict:
         "first_name": player.first_name,
         "second_name": player.second_name,
         "team": player.team,
+        "team_id": player.team,
         "position": player.position.value,
         "now_cost": player.now_cost,
         "total_points": player.total_points,
