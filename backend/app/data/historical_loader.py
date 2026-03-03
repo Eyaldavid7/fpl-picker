@@ -18,7 +18,6 @@ import httpx
 import pandas as pd
 
 from app.config import get_settings
-from app.data.cache import FileCache
 
 logger = logging.getLogger(__name__)
 

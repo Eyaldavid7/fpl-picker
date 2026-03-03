@@ -43,7 +43,7 @@ async def chip_strategy(request: ChipStrategyRequest) -> ChipStrategyResponse:
         from app.data.fpl_client import get_fpl_client
         from app.prediction.engine import get_prediction_engine
 
-        client = get_fpl_client()
+        get_fpl_client()
         pred_engine = get_prediction_engine()
 
         # Build predictions for upcoming GWs

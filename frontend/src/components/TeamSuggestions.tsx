@@ -13,10 +13,12 @@ import {
 import type {
   SubstituteResponse,
   SubstituteSuggestion,
+  SquadPlayerFixture,
   TransferResponse,
   TransferSuggestion,
   Position,
 } from "@/types";
+import FDRBadge from "@/components/FDRBadge";
 
 // ---------- Props ----------
 
@@ -26,6 +28,7 @@ interface TeamSuggestionsProps {
   subsLoading: boolean;
   transfersLoading: boolean;
   onFetchTransfers: (budgetRemaining: number, freeTransfers: number) => void;
+  teamBank?: number; // Bank balance in millions from team ID import
 }
 
 // ---------- Helpers ----------
@@ -45,6 +48,17 @@ function formatPoints(pts: number): string {
 
 function formatPrice(price: number): string {
   return `${(price / 10).toFixed(1)}m`;
+}
+
+/** Parse an opponent string like "Arsenal (A)" into FDRBadge props. */
+function parseOpponent(opponent: string): {
+  opponentShortName: string;
+  isHome: boolean;
+} {
+  const teamName = opponent.replace(/\s*\([HA]\)\s*$/, "").trim();
+  const opponentShortName = teamName.substring(0, 3);
+  const isHome = opponent.includes("(H)");
+  return { opponentShortName, isHome };
 }
 
 // ---------- Skeleton Loaders ----------
@@ -126,6 +140,17 @@ function SubstitutionCard({ suggestion }: { suggestion: SubstituteSuggestion }) 
           <p className="mt-1.5 font-semibold text-[var(--foreground)] truncate">
             {suggestion.bench_player_name}
           </p>
+          {suggestion.bench_next_opponent && suggestion.bench_fdr != null && (
+            <p className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] mt-0.5">
+              <span className="truncate">vs {suggestion.bench_next_opponent}</span>
+              <FDRBadge
+                difficulty={suggestion.bench_fdr}
+                opponentShortName={parseOpponent(suggestion.bench_next_opponent).opponentShortName}
+                isHome={parseOpponent(suggestion.bench_next_opponent).isHome}
+                compact
+              />
+            </p>
+          )}
           <p className="text-xs text-[var(--muted-foreground)]">
             {formatPoints(suggestion.bench_predicted_points)} pts predicted
           </p>
@@ -148,6 +173,17 @@ function SubstitutionCard({ suggestion }: { suggestion: SubstituteSuggestion }) 
           <p className="mt-1.5 font-semibold text-[var(--foreground)] truncate">
             {suggestion.starter_player_name}
           </p>
+          {suggestion.starter_next_opponent && suggestion.starter_fdr != null && (
+            <p className="flex items-center justify-end gap-1.5 text-xs text-[var(--muted-foreground)] mt-0.5">
+              <span className="truncate">vs {suggestion.starter_next_opponent}</span>
+              <FDRBadge
+                difficulty={suggestion.starter_fdr}
+                opponentShortName={parseOpponent(suggestion.starter_next_opponent).opponentShortName}
+                isHome={parseOpponent(suggestion.starter_next_opponent).isHome}
+                compact
+              />
+            </p>
+          )}
           <p className="text-xs text-[var(--muted-foreground)]">
             {formatPoints(suggestion.starter_predicted_points)} pts predicted
           </p>
@@ -250,10 +286,19 @@ export default function TeamSuggestions({
   subsLoading,
   transfersLoading,
   onFetchTransfers,
+  teamBank,
 }: TeamSuggestionsProps) {
   const [activeTab, setActiveTab] = useState<Tab>("substitutions");
   const [budgetRemaining, setBudgetRemaining] = useState(0);
   const [freeTransfers, setFreeTransfers] = useState(1);
+  const [prevTeamBank, setPrevTeamBank] = useState(teamBank);
+
+  // Auto-populate budget from team data when the prop changes
+  // (React docs pattern: "Adjusting state when a prop changes")
+  if (teamBank != null && teamBank !== prevTeamBank) {
+    setPrevTeamBank(teamBank);
+    setBudgetRemaining(teamBank);
+  }
 
   const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
     {
@@ -306,19 +351,126 @@ export default function TeamSuggestions({
             </div>
           )}
 
-          {/* No suggestions */}
+          {/* No suggestions — show fixture overview */}
           {!subsLoading &&
             substituteSuggestions &&
             substituteSuggestions.suggestions.length === 0 && (
-              <div className="flex flex-col items-center py-10 text-center">
-                <CheckCircle2 className="h-10 w-10 text-green-400 mb-3" />
-                <p className="text-sm font-medium text-[var(--foreground)]">
-                  Your starting XI looks optimal
-                </p>
-                <p className="text-xs text-[var(--muted-foreground)] mt-1">
-                  No changes recommended - your bench players are not predicted
-                  to outscore any starters.
-                </p>
+              <div className="animate-fade-in">
+                <div className="flex flex-col items-center py-6 text-center mb-4">
+                  <CheckCircle2 className="h-10 w-10 text-green-400 mb-3" />
+                  <p className="text-sm font-medium text-[var(--foreground)]">
+                    Your starting XI looks optimal
+                  </p>
+                  <p className="text-xs text-[var(--muted-foreground)] mt-1">
+                    No changes recommended — your bench players are not predicted
+                    to outscore any starters.
+                  </p>
+                </div>
+
+                {/* Squad fixture overview */}
+                {substituteSuggestions.squad_fixtures &&
+                  substituteSuggestions.squad_fixtures.length > 0 && (
+                    <div className="rounded-lg border border-[var(--border)] bg-[var(--background)] p-4">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-3">
+                        Next Fixture Overview
+                      </p>
+                      <div className="space-y-1.5">
+                        {substituteSuggestions.squad_fixtures
+                          .filter((f: SquadPlayerFixture) => f.is_starter)
+                          .map((f: SquadPlayerFixture) => (
+                            <div
+                              key={f.player_id}
+                              className="flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-[var(--muted)]/30 transition-colors"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span
+                                  className={
+                                    positionBadgeClass[f.position] + " text-[10px] !px-1.5 !py-0"
+                                  }
+                                >
+                                  {f.position}
+                                </span>
+                                <span className="text-sm font-medium text-[var(--foreground)] truncate">
+                                  {f.web_name}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="text-xs text-[var(--muted-foreground)]">
+                                  {f.predicted_points.toFixed(1)} pts
+                                </span>
+                                {f.next_opponent && f.fdr != null && (
+                                  <FDRBadge
+                                    difficulty={f.fdr}
+                                    opponentShortName={
+                                      parseOpponent(f.next_opponent)
+                                        .opponentShortName
+                                    }
+                                    isHome={
+                                      parseOpponent(f.next_opponent).isHome
+                                    }
+                                    compact
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          ))}
+
+                        {/* Bench separator */}
+                        {substituteSuggestions.squad_fixtures.some(
+                          (f: SquadPlayerFixture) => !f.is_starter
+                        ) && (
+                          <>
+                            <div className="border-t border-[var(--border)] my-2" />
+                            <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-1 px-2">
+                              Bench
+                            </p>
+                            {substituteSuggestions.squad_fixtures
+                              .filter(
+                                (f: SquadPlayerFixture) => !f.is_starter
+                              )
+                              .map((f: SquadPlayerFixture) => (
+                                <div
+                                  key={f.player_id}
+                                  className="flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-[var(--muted)]/30 transition-colors opacity-70"
+                                >
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span
+                                      className={
+                                        positionBadgeClass[f.position] +
+                                        " text-[10px] !px-1.5 !py-0"
+                                      }
+                                    >
+                                      {f.position}
+                                    </span>
+                                    <span className="text-sm font-medium text-[var(--foreground)] truncate">
+                                      {f.web_name}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className="text-xs text-[var(--muted-foreground)]">
+                                      {f.predicted_points.toFixed(1)} pts
+                                    </span>
+                                    {f.next_opponent && f.fdr != null && (
+                                      <FDRBadge
+                                        difficulty={f.fdr}
+                                        opponentShortName={
+                                          parseOpponent(f.next_opponent)
+                                            .opponentShortName
+                                        }
+                                        isHome={
+                                          parseOpponent(f.next_opponent).isHome
+                                        }
+                                        compact
+                                      />
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
               </div>
             )}
 
@@ -375,6 +527,11 @@ export default function TeamSuggestions({
                   className="fpl-input"
                   placeholder="0.0"
                 />
+                {teamBank != null && (
+                  <p className="text-[10px] text-[var(--muted-foreground)] mt-1">
+                    Auto-filled from last GW deadline. Adjust if you have pending transfers.
+                  </p>
+                )}
               </div>
 
               {/* Free transfers */}

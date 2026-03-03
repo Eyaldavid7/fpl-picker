@@ -13,7 +13,6 @@ import asyncio
 import logging
 import time
 from functools import lru_cache
-from typing import Sequence
 
 import httpx
 
@@ -45,6 +44,7 @@ class FPLClient:
         "entry": "/entry/{id}/",
         "entry_history": "/entry/{id}/history/",
         "entry_picks": "/entry/{id}/event/{gw}/picks/",
+        "entry_transfers": "/entry/{id}/transfers/",
         "dream_team": "/dream-team/{gw}/",
     }
 
@@ -214,6 +214,12 @@ class FPLClient:
         """Fetch manager picks for a specific gameweek."""
         url = f"{self.base_url}{self.ENDPOINTS['entry_picks'].format(id=entry_id, gw=gameweek)}"
         cache_key = f"entry_picks_{entry_id}_gw{gameweek}"
+        return await self._get_cached_or_fetch(cache_key, url, "entry")
+
+    async def get_entry_transfers(self, entry_id: int) -> list[dict]:
+        """Fetch all transfers for a manager."""
+        url = f"{self.base_url}{self.ENDPOINTS['entry_transfers'].format(id=entry_id)}"
+        cache_key = f"entry_transfers_{entry_id}"
         return await self._get_cached_or_fetch(cache_key, url, "entry")
 
     # ------------------------------------------------------------------

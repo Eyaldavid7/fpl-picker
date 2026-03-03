@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.api.schemas.player import PlayerDetailResponse, PlayerListResponse, PlayerSummary
+from app.api.schemas.player import PlayerDetailResponse, PlayerListResponse
 from app.data.fpl_client import get_fpl_client
 from app.data.models import (
     Fixture,

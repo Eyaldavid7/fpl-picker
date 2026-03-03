@@ -15,10 +15,14 @@ class SubstituteSuggestion(BaseModel):
     bench_player_name: str
     bench_player_position: str
     bench_predicted_points: float
+    bench_next_opponent: str | None = None  # e.g. "Arsenal (A)"
+    bench_fdr: int | None = None  # Fixture Difficulty Rating 1-5
     starter_player_id: int
     starter_player_name: str
     starter_player_position: str
     starter_predicted_points: float
+    starter_next_opponent: str | None = None
+    starter_fdr: int | None = None
     point_gain: float
     reason: str
 
@@ -30,10 +34,23 @@ class SubstituteRequest(BaseModel):
     formation: str = "4-4-2"
 
 
+class SquadPlayerFixture(BaseModel):
+    """Next-fixture context for a single squad player."""
+
+    player_id: int
+    web_name: str
+    position: str
+    is_starter: bool
+    predicted_points: float
+    next_opponent: str | None = None  # e.g. "Arsenal (A)"
+    fdr: int | None = None  # Fixture Difficulty Rating 1-5
+
+
 class SubstituteResponse(BaseModel):
     """Response containing ordered substitute swap suggestions."""
 
     suggestions: list[SubstituteSuggestion]
+    squad_fixtures: list[SquadPlayerFixture] = []
 
 
 # ---------------------------------------------------------------------------

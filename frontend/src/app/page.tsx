@@ -8,10 +8,18 @@ import {
   Zap,
   Cpu,
   RefreshCw,
+  AlertTriangle,
+  WifiOff,
+  ServerCrash,
 } from "lucide-react";
 import StatsCard from "@/components/StatsCard";
 import PlayerCard from "@/components/PlayerCard";
 import { usePlayers, useGameweeks, useRefreshData } from "@/hooks/useApi";
+import {
+  categoriseError,
+  friendlyErrorMessage,
+  getApiBaseUrl,
+} from "@/lib/api-client";
 import type { Player, Gameweek } from "@/types";
 
 export default function DashboardPage() {
@@ -121,8 +129,29 @@ export default function DashboardPage() {
               ))}
             </div>
           ) : playersError ? (
-            <div className="mt-4 rounded-md bg-red-500/10 border border-red-500/20 p-4 text-sm text-red-400">
-              Could not load players. Make sure the backend is running.
+            <div className="mt-4 rounded-md bg-red-500/10 border border-red-500/20 p-4 text-sm text-red-400 space-y-2">
+              <div className="flex items-start gap-2">
+                {categoriseError(playersError) === "network" ? (
+                  <WifiOff className="h-4 w-4 mt-0.5 shrink-0" />
+                ) : categoriseError(playersError) === "server" ? (
+                  <ServerCrash className="h-4 w-4 mt-0.5 shrink-0" />
+                ) : (
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                )}
+                <div>
+                  <p className="font-medium">
+                    {categoriseError(playersError) === "network"
+                      ? "Backend Unreachable"
+                      : "Could not load players"}
+                  </p>
+                  <p className="mt-1 whitespace-pre-line text-red-400/80">
+                    {friendlyErrorMessage(playersError)}
+                  </p>
+                  <p className="mt-2 text-xs text-red-400/60">
+                    API URL: {getApiBaseUrl()}
+                  </p>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -171,7 +200,7 @@ export default function DashboardPage() {
         </div>
         <div className="mt-4 text-sm text-[var(--muted-foreground)]">
           {playersError
-            ? "Connect to the backend to see fixture data."
+            ? `Connect to the backend to see fixture data. (API: ${getApiBaseUrl()})`
             : "Import your squad on the Optimizer page to see your personalized fixture schedule."}
         </div>
       </div>

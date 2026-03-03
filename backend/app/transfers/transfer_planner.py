@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import math
-from copy import deepcopy
 
 from app.transfers.models import TransferAction, TransferPlan
 
@@ -268,7 +267,7 @@ class TransferPlanner:
             actions.append(best_action)
             # Update local state for next iteration within same GW
             if best_action.player_out_id in squad:
-                squad_copy_idx = squad.index(best_action.player_out_id)
+                squad.index(best_action.player_out_id)
             available_players.discard(best_action.player_in_id)
 
         return actions

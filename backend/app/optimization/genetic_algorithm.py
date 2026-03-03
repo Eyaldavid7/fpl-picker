@@ -17,8 +17,6 @@ from app.optimization.constraints import (
     FORMATION_RULES,
     MAX_PER_CLUB,
     SQUAD_COMPOSITION,
-    SQUAD_SIZE,
-    VALID_FORMATIONS,
 )
 from app.optimization.models import OptimizationResult
 
@@ -430,7 +428,7 @@ class GASolver:
             if "club" in violations and over_clubs:
                 # Find a player from an over-represented club and swap
                 club = over_clubs[0]
-                club_players = [j for j in chrom if teams[j] == club]
+                [j for j in chrom if teams[j] == club]
                 # Pick the one with worst predicted points
                 victim_idx = min(range(len(chrom)), key=lambda i: (
                     0 if teams[chrom[i]] != club else -costs[chrom[i]]

@@ -90,7 +90,7 @@ class ILPSolver:
         # ------------------------------------------------------------------
         n = len(players)
         ids = [p["id"] for p in players]
-        id_set = set(ids)
+        set(ids)
         idx_of: dict[int, int] = {pid: i for i, pid in enumerate(ids)}
 
         costs = [p["now_cost"] / 10.0 for p in players]  # real-money
@@ -231,8 +231,14 @@ class ILPSolver:
         squad_indices = [j for j in range(n) if pulp.value(x[j]) > 0.5]
         xi_indices = [j for j in range(n) if pulp.value(s[j]) > 0.5]
         bench_indices = [j for j in squad_indices if j not in set(xi_indices)]
-        captain_idx = next(j for j in range(n) if pulp.value(c[j]) > 0.5)
-        vc_idx = next(j for j in range(n) if pulp.value(vc[j]) > 0.5)
+        captain_idx = next(
+            (j for j in range(n) if pulp.value(c[j]) > 0.5),
+            xi_indices[0] if xi_indices else 0,
+        )
+        vc_idx = next(
+            (j for j in range(n) if pulp.value(vc[j]) > 0.5),
+            xi_indices[1] if len(xi_indices) > 1 else xi_indices[0] if xi_indices else 0,
+        )
 
         # Sort bench by predicted points descending (best sub first)
         bench_indices.sort(key=lambda j: preds[j], reverse=True)

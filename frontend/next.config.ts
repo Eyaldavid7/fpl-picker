@@ -1,18 +1,12 @@
 import type { NextConfig } from "next";
 
-const backendUrl =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 const nextConfig: NextConfig = {
-  // Proxy API requests to the FastAPI backend
-  async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backendUrl}/api/:path*`,
-      },
-    ];
+  output: "export",
+  images: {
+    unoptimized: true,
   },
+  // Note: rewrites() are not supported with output: "export" (static site).
+  // The frontend calls the backend directly via NEXT_PUBLIC_API_URL instead.
 };
 
 export default nextConfig;

@@ -28,7 +28,6 @@ Chip descriptions and scoring heuristics
 from __future__ import annotations
 
 import logging
-from typing import Sequence
 
 from app.transfers.models import ChipRecommendation, ChipType
 

@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://fpl-picker-app.web.app",
+        "https://fpl-picker-app.firebaseapp.com",
+        "https://fpl-picker-backend-567427318686.us-east1.run.app",
     ]
 
     model_config = {"env_file": ".env", "env_prefix": "FPL_"}

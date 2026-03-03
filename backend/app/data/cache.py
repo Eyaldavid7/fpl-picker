@@ -7,7 +7,6 @@ requiring Redis or any external service.
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any

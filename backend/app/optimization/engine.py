@@ -7,7 +7,6 @@ plus convenience methods for comparing the two approaches.
 from __future__ import annotations
 
 import logging
-import time
 
 from app.optimization.constraints import VALID_FORMATIONS
 from app.optimization.genetic_algorithm import GASolver

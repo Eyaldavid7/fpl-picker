@@ -151,6 +151,9 @@ export interface SquadPlayer {
   is_starter: boolean;
   is_captain: boolean;
   is_vice_captain: boolean;
+  status: PlayerStatus;
+  chance_of_playing: number | null;
+  news: string;
 }
 
 // ---------- Optimization ----------
@@ -201,6 +204,22 @@ export interface ScreenshotImportResult {
   matched_count: number;
 }
 
+/** Response from the team-ID import endpoint. */
+export interface TeamIdImportResult {
+  team_name: string;
+  manager_name: string;
+  gameweek: number;
+  players: MatchedPlayer[];
+  starting_xi: number[];
+  bench: number[];
+  captain_id: number | null;
+  vice_captain_id: number | null;
+  overall_points: number;
+  overall_rank: number;
+  bank: number;
+  team_value: number;
+}
+
 // ---------- Squad Fixtures (Next-Opponent) ----------
 
 /** A single upcoming fixture for a player in the squad. */
@@ -241,10 +260,14 @@ export interface SubstituteSuggestion {
   bench_player_name: string;
   bench_player_position: Position;
   bench_predicted_points: number;
+  bench_next_opponent: string | null;
+  bench_fdr: number | null;
   starter_player_id: number;
   starter_player_name: string;
   starter_player_position: Position;
   starter_predicted_points: number;
+  starter_next_opponent: string | null;
+  starter_fdr: number | null;
   point_gain: number;
   reason: string;
 }
@@ -255,9 +278,21 @@ export interface SubstituteRequest {
   formation?: string;
 }
 
+/** Next-fixture context for a squad player (returned with substitute suggestions). */
+export interface SquadPlayerFixture {
+  player_id: number;
+  web_name: string;
+  position: Position;
+  is_starter: boolean;
+  predicted_points: number;
+  next_opponent: string | null;
+  fdr: number | null;
+}
+
 /** Response from the substitutes endpoint. */
 export interface SubstituteResponse {
   suggestions: SubstituteSuggestion[];
+  squad_fixtures: SquadPlayerFixture[];
 }
 
 /** A single transfer-in / transfer-out recommendation. */

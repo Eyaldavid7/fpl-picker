@@ -16,9 +16,8 @@ breakdowns exposed through the API.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from app.prediction.base import BasePredictor, BaseMLPredictor, PredictionResult
+from app.prediction.base import BasePredictor, BaseMLPredictor
 
 logger = logging.getLogger(__name__)
 

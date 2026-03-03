@@ -13,6 +13,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas.suggestions import (
+    SquadPlayerFixture,
     SubstituteRequest,
     SubstituteResponse,
     SubstituteSuggestion,
@@ -39,7 +40,6 @@ FORMATION_MAP: dict[str, tuple[int, int, int]] = {
     "4-3-3": (4, 3, 3),
     "4-4-2": (4, 4, 2),
     "4-5-1": (4, 5, 1),
-    "5-2-3": (5, 2, 3),
     "5-3-2": (5, 3, 2),
     "5-4-1": (5, 4, 1),
 }
@@ -73,6 +73,20 @@ def _parse_formation(formation: str) -> dict[Position, int]:
 # Scoring helpers
 # ---------------------------------------------------------------------------
 
+# FDR multipliers: lower difficulty = boost, higher = penalty
+_FDR_MULTIPLIERS: dict[int, float] = {
+    1: 1.15,
+    2: 1.08,
+    3: 1.0,
+    4: 0.92,
+    5: 0.85,
+}
+
+# Type alias for the fixture lookup built from next-GW fixtures.
+# Maps team_id -> {"opponent_name": str, "is_home": bool, "fdr": int}
+FixtureLookup = dict[int, dict]
+
+
 def _predicted_score(player: Player) -> float:
     """Compute a simple predicted-points heuristic for a player.
 
@@ -91,6 +105,27 @@ def _predicted_score(player: Player) -> float:
     if ppg > 0:
         return round(ppg, 2)
     return 0.01
+
+
+def _fixture_adjusted_score(player: Player, fixture_lookup: FixtureLookup) -> float:
+    """Return predicted score adjusted by next-fixture difficulty.
+
+    If the player's team has no fixture in the lookup (bye/blank gameweek),
+    the raw predicted score is returned without adjustment.
+    """
+    base = _predicted_score(player)
+    fixture_info = fixture_lookup.get(player.team)
+    if fixture_info is None:
+        return base
+    fdr = fixture_info["fdr"]
+    multiplier = _FDR_MULTIPLIERS.get(fdr, 1.0)
+    return round(base * multiplier, 2)
+
+
+def _format_opponent(fixture_info: dict) -> str:
+    """Format opponent string like 'Arsenal (H)' or 'Chelsea (A)'."""
+    suffix = "H" if fixture_info["is_home"] else "A"
+    return f"{fixture_info['opponent_name']} ({suffix})"
 
 
 def _availability_ok(player: Player) -> bool:
@@ -114,12 +149,13 @@ async def suggest_substitutes(
 
     Algorithm:
     1. Fetch all FPL players and filter to the provided squad IDs.
-    2. Parse the formation to determine position quotas for the starting XI.
-    3. Within each position, rank squad members by predicted points and
-       assign the top N as starters and the rest as bench.
-    4. For every bench player, check if they outscore any starter in the
+    2. Fetch next-GW fixtures and build a fixture difficulty lookup.
+    3. Parse the formation to determine position quotas for the starting XI.
+    4. Within each position, rank squad members by fixture-adjusted predicted
+       points and assign the top N as starters and the rest as bench.
+    5. For every bench player, check if they outscore any starter in the
        *same position* -- if so, emit a swap suggestion.
-    5. Return suggestions ordered by descending point gain.
+    6. Return suggestions ordered by descending point gain.
     """
     client = get_fpl_client()
 
@@ -131,6 +167,38 @@ async def suggest_substitutes(
             status_code=502,
             detail=f"Could not fetch live FPL data: {exc}",
         )
+
+    # ------------------------------------------------------------------
+    # Fetch next-GW fixture data for difficulty adjustments
+    # ------------------------------------------------------------------
+    fixture_lookup: FixtureLookup = {}
+    try:
+        current_gw = await client.get_current_gameweek()
+        next_gw = current_gw + 1
+        next_fixtures = await client.get_typed_fixtures(next_gw)
+        teams_map = await client.get_teams_map()
+
+        for fix in next_fixtures:
+            # Home team entry
+            fixture_lookup[fix.team_h] = {
+                "opponent_name": teams_map.get(fix.team_a, f"Team {fix.team_a}"),
+                "is_home": True,
+                "fdr": fix.team_h_difficulty,
+            }
+            # Away team entry
+            fixture_lookup[fix.team_a] = {
+                "opponent_name": teams_map.get(fix.team_h, f"Team {fix.team_h}"),
+                "is_home": False,
+                "fdr": fix.team_a_difficulty,
+            }
+    except Exception as exc:
+        logger.warning(
+            "Could not fetch next-GW fixture data; falling back to "
+            "unadjusted scores: %s",
+            exc,
+        )
+        # fixture_lookup stays empty -- _fixture_adjusted_score will
+        # return unadjusted predictions for all players.
 
     # Build lookup of squad players
     player_map: dict[int, Player] = {p.id: p for p in all_players}
@@ -161,21 +229,28 @@ async def suggest_substitutes(
     for p in squad_players:
         by_position[p.position].append(p)
 
-    # Within each position, sort by predicted score descending and split
-    # into starters vs bench.
+    # Within each position, sort by fixture-adjusted predicted score
+    # descending and split into starters vs bench.
     starters: list[Player] = []
     bench: list[Player] = []
 
     for pos in (Position.GKP, Position.DEF, Position.MID, Position.FWD):
         group = by_position.get(pos, [])
-        group.sort(key=_predicted_score, reverse=True)
+        group.sort(
+            key=lambda p: _fixture_adjusted_score(p, fixture_lookup),
+            reverse=True,
+        )
         n_start = position_slots.get(pos, 0)
         starters.extend(group[:n_start])
         bench.extend(group[n_start:])
 
-    # Compute predicted scores
-    starter_scores = {p.id: _predicted_score(p) for p in starters}
-    bench_scores = {p.id: _predicted_score(p) for p in bench}
+    # Compute fixture-adjusted predicted scores
+    starter_scores = {
+        p.id: _fixture_adjusted_score(p, fixture_lookup) for p in starters
+    }
+    bench_scores = {
+        p.id: _fixture_adjusted_score(p, fixture_lookup) for p in bench
+    }
 
     # For each bench player, see if they outscore any starter in the same
     # position.  Only emit swaps where bench > starter.
@@ -196,6 +271,15 @@ async def suggest_substitutes(
         if point_gain <= 0:
             continue
 
+        # Resolve fixture info for both players
+        bench_fix = fixture_lookup.get(bench_player.team)
+        starter_fix = fixture_lookup.get(weakest.team)
+
+        bench_next_opponent = _format_opponent(bench_fix) if bench_fix else None
+        bench_fdr = bench_fix["fdr"] if bench_fix else None
+        starter_next_opponent = _format_opponent(starter_fix) if starter_fix else None
+        starter_fdr = starter_fix["fdr"] if starter_fix else None
+
         # Build a human-readable reason
         reason_parts: list[str] = []
         reason_parts.append(
@@ -206,6 +290,21 @@ async def suggest_substitutes(
             reason_parts.append(
                 f"higher recent form ({bench_player.form:.1f} vs {weakest.form:.1f})"
             )
+        # Mention fixture difficulty when it differs significantly
+        if bench_fdr is not None and starter_fdr is not None:
+            fdr_diff = starter_fdr - bench_fdr
+            if fdr_diff >= 2:
+                reason_parts.append(
+                    f"much easier fixture: {bench_next_opponent} "
+                    f"(FDR {bench_fdr}) vs {starter_next_opponent} "
+                    f"(FDR {starter_fdr})"
+                )
+            elif fdr_diff == 1:
+                reason_parts.append(
+                    f"easier fixture: {bench_next_opponent} "
+                    f"(FDR {bench_fdr}) vs {starter_next_opponent} "
+                    f"(FDR {starter_fdr})"
+                )
         if not _availability_ok(weakest):
             reason_parts.append(
                 f"{weakest.web_name} has availability concerns"
@@ -218,10 +317,14 @@ async def suggest_substitutes(
                 bench_player_name=bench_player.web_name,
                 bench_player_position=bench_player.position.value,
                 bench_predicted_points=bench_pred,
+                bench_next_opponent=bench_next_opponent,
+                bench_fdr=bench_fdr,
                 starter_player_id=weakest.id,
                 starter_player_name=weakest.web_name,
                 starter_player_position=weakest.position.value,
                 starter_predicted_points=weakest_pred,
+                starter_next_opponent=starter_next_opponent,
+                starter_fdr=starter_fdr,
                 point_gain=point_gain,
                 reason="; ".join(reason_parts),
             )
@@ -230,7 +333,26 @@ async def suggest_substitutes(
     # Sort by highest point gain first
     suggestions.sort(key=lambda s: s.point_gain, reverse=True)
 
-    return SubstituteResponse(suggestions=suggestions)
+    # Build squad fixture context for all players (useful even when no swaps)
+    starter_ids = {p.id for p in starters}
+    squad_fixtures: list[SquadPlayerFixture] = []
+    for p in squad_players:
+        fix = fixture_lookup.get(p.team)
+        squad_fixtures.append(
+            SquadPlayerFixture(
+                player_id=p.id,
+                web_name=p.web_name,
+                position=p.position.value,
+                is_starter=p.id in starter_ids,
+                predicted_points=_fixture_adjusted_score(p, fixture_lookup),
+                next_opponent=_format_opponent(fix) if fix else None,
+                fdr=fix["fdr"] if fix else None,
+            )
+        )
+    # Sort: starters first (by predicted pts desc), then bench
+    squad_fixtures.sort(key=lambda f: (not f.is_starter, -f.predicted_points))
+
+    return SubstituteResponse(suggestions=suggestions, squad_fixtures=squad_fixtures)
 
 
 # ---------------------------------------------------------------------------

@@ -57,6 +57,9 @@ def _player_dict_to_squad_player(
         is_starter=is_starter,
         is_captain=is_captain,
         is_vice_captain=is_vice,
+        status=p.get("status", "a"),
+        chance_of_playing=p.get("chance_of_playing"),
+        news=p.get("news", ""),
     )
 
 
@@ -142,6 +145,10 @@ async def optimize_squad(
             # Skip players with 0 minutes (haven't played)
             if (el.get("minutes") or 0) == 0:
                 continue
+            # Skip players unlikely to play next round
+            chance = el.get("chance_of_playing_next_round")
+            if chance is not None and chance < 50:
+                continue
 
             pid = el["id"]
             # Build a clean player dict for the solver (don't mutate cache)
@@ -154,13 +161,22 @@ async def optimize_squad(
                 "now_cost": el.get("now_cost", 0),
                 "team": el.get("team", 0),
                 "team_id": el.get("team", 0),
+                "status": status,
+                "chance_of_playing": chance,
+                "news": el.get("news", ""),
             }
             players.append(player)
 
             # Use 'form' as predicted points; fall back to points_per_game
             form = float(el.get("form") or 0)
             ppg = float(el.get("points_per_game") or 0)
-            predictions[pid] = form if form > 0 else ppg
+            pred = form if form > 0 else ppg
+
+            # Discount prediction for doubtful players (75% chance = 75% of pts)
+            if chance is not None and chance < 100:
+                pred = round(pred * (chance / 100), 2)
+
+            predictions[pid] = pred
 
         logger.info(
             "Auto-fetched %d eligible players from FPL API", len(players)
@@ -185,11 +201,17 @@ async def optimize_squad(
     # For GA, take the best result
     if isinstance(result, list):
         if not result or not result[0].squad:
-            raise HTTPException(status_code=500, detail="Optimisation produced no result.")
+            raise HTTPException(
+                status_code=422,
+                detail="Optimisation produced no result. The budget or constraints may be too restrictive to form a valid squad.",
+            )
         result = result[0]
 
     if not result.squad:
-        raise HTTPException(status_code=500, detail="Optimisation produced no result.")
+        raise HTTPException(
+            status_code=422,
+            detail="Optimisation produced no result. The budget or constraints may be too restrictive to form a valid squad.",
+        )
 
     return _result_to_response(result, predictions)
 

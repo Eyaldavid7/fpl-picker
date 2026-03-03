@@ -7,7 +7,7 @@ Provides:
 - GET  /effective-ownership -- effective ownership for all players
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 
 from app.api.schemas.transfer import (
     TransferRecommendRequest,

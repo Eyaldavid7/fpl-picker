@@ -13,8 +13,6 @@ Orchestrates the full prediction pipeline for FPL players:
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
-from functools import lru_cache
 from typing import Any
 
 from app.prediction.arima_model import ARIMAPredictor

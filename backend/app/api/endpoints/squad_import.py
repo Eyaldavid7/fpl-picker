@@ -2,17 +2,29 @@
 
 import json
 import logging
+import warnings
 from difflib import SequenceMatcher
 
-import google.generativeai as genai
+# google.generativeai is deprecated in favour of google-genai, but we keep
+# using it here for backwards compatibility.  Suppress the deprecation warning
+# so it doesn't clutter logs.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    import google.generativeai as genai  # noqa: E402
 from fastapi import APIRouter, HTTPException, UploadFile
+
+import httpx
 
 from app.api.schemas.squad_import import (
     MatchedPlayer,
     ScreenshotImportResponse,
+    TeamIdImportRequest,
+    TeamIdImportResult,
 )
 from app.config import get_settings
-from app.data.fpl_client import FPLClient
+from app.data.fpl_client import get_fpl_client
+from app.data.models import POSITION_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +151,7 @@ async def import_screenshot(file: UploadFile):
         return ScreenshotImportResponse(players=[], extracted_count=0, matched_count=0)
 
     # Fetch FPL player data and team names for matching
-    client = FPLClient()
+    client = get_fpl_client()
     all_players = await client.get_players()
     team_map = await client.get_teams_map()  # {team_id: short_name}
 
@@ -162,4 +174,165 @@ async def import_screenshot(file: UploadFile):
         players=matched,
         extracted_count=len(names),
         matched_count=matched_count,
+    )
+
+
+@router.post("/team-id", response_model=TeamIdImportResult)
+async def import_by_team_id(request: TeamIdImportRequest):
+    """Import a squad by FPL team ID.
+
+    Fetches the manager's current gameweek picks from the official FPL API
+    and returns full player details with lineup structure.
+    """
+    client = get_fpl_client()
+
+    # --- Fetch team/entry info ---
+    try:
+        entry = await client.get_entry(request.team_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"FPL team with ID {request.team_id} not found.",
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"FPL API error while fetching team info: {exc.response.status_code}",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach FPL API: {exc}",
+        ) from exc
+
+    # --- Get the current gameweek ---
+    try:
+        current_gw = await client.get_current_gameweek()
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"FPL API error while fetching current gameweek: {exc}",
+        ) from exc
+
+    # --- Fetch picks for the current gameweek ---
+    try:
+        picks_data = await client.get_entry_picks(request.team_id, current_gw)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No picks found for team {request.team_id} in gameweek {current_gw}.",
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"FPL API error while fetching picks: {exc.response.status_code}",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach FPL API: {exc}",
+        ) from exc
+
+    # --- Fetch bootstrap data for player lookups ---
+    try:
+        bootstrap = await client.get_bootstrap()
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"FPL API error while fetching player data: {exc}",
+        ) from exc
+
+    # Build lookup maps
+    elements_by_id: dict[int, dict] = {
+        el["id"]: el for el in bootstrap.get("elements", [])
+    }
+    team_map: dict[int, str] = {
+        t["id"]: t["short_name"] for t in bootstrap.get("teams", [])
+    }
+
+    # --- Process picks ---
+    picks = picks_data.get("picks", [])
+    starting_xi: list[int] = []
+    bench: list[int] = []
+    captain_id: int | None = None
+    vice_captain_id: int | None = None
+    matched_players: list[MatchedPlayer] = []
+
+    for pick in picks:
+        player_id = pick["element"]
+        position = pick["position"]  # 1-15
+        is_captain = pick.get("is_captain", False)
+        is_vice_captain = pick.get("is_vice_captain", False)
+
+        if is_captain:
+            captain_id = player_id
+        if is_vice_captain:
+            vice_captain_id = player_id
+
+        if position <= 11:
+            starting_xi.append(player_id)
+        else:
+            bench.append(player_id)
+
+        # Build MatchedPlayer from bootstrap element data
+        element = elements_by_id.get(player_id)
+        if element:
+            pos_enum = POSITION_MAP.get(element.get("element_type", 3))
+            pos_str = pos_enum.value if pos_enum else None
+            matched_players.append(
+                MatchedPlayer(
+                    extracted_name=element.get("web_name", ""),
+                    player_id=player_id,
+                    web_name=element.get("web_name"),
+                    position=pos_str,
+                    team_name=team_map.get(element.get("team", 0)),
+                    confidence=1.0,
+                )
+            )
+        else:
+            matched_players.append(
+                MatchedPlayer(
+                    extracted_name=f"Unknown ({player_id})",
+                    player_id=player_id,
+                    confidence=0.0,
+                )
+            )
+
+    # --- Extract team/manager metadata ---
+    team_name = entry.get("name", "")
+    first_name = entry.get("player_first_name", "")
+    last_name = entry.get("player_last_name", "")
+    manager_name = f"{first_name} {last_name}".strip()
+
+    overall_points = entry.get("summary_overall_points", 0) or 0
+    overall_rank = entry.get("summary_overall_rank", 0) or 0
+
+    # Bank and team value come from the picks endpoint (entry_history within picks)
+    entry_history = picks_data.get("entry_history", {})
+    bank = (entry_history.get("bank", 0) or 0) / 10  # convert from 0.1m units
+    team_value = (entry_history.get("value", 0) or 0) / 10  # convert from 0.1m units
+
+    # Adjust bank for pending transfers (made after current GW deadline)
+    try:
+        transfers = await client.get_entry_transfers(request.team_id)
+        for t in transfers:
+            if t.get("event", 0) > current_gw:
+                # Pending transfer: subtract net cost (in_cost - out_cost, in 0.1m units)
+                bank -= (t.get("element_in_cost", 0) - t.get("element_out_cost", 0)) / 10
+    except (httpx.HTTPStatusError, httpx.RequestError):
+        pass  # Non-critical: fall back to deadline bank
+
+    return TeamIdImportResult(
+        team_name=team_name,
+        manager_name=manager_name,
+        gameweek=current_gw,
+        players=matched_players,
+        starting_xi=starting_xi,
+        bench=bench,
+        captain_id=captain_id,
+        vice_captain_id=vice_captain_id,
+        overall_points=overall_points,
+        overall_rank=overall_rank,
+        bank=bank,
+        team_value=team_value,
     )

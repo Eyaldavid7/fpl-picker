@@ -33,6 +33,9 @@ class SquadPlayer(BaseModel):
     is_starter: bool = True
     is_captain: bool = False
     is_vice_captain: bool = False
+    status: str = "a"  # a=available, d=doubtful, i=injured, s=suspended, u=unavailable
+    chance_of_playing: int | None = None  # 0-100 or null
+    news: str = ""  # Injury/availability news string
 
 
 class SquadOptimizationRequest(BaseModel):

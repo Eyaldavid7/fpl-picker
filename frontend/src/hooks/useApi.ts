@@ -11,6 +11,7 @@ import type {
   OptimizationRequest,
   OptimizationResult,
   ScreenshotImportResult,
+  TeamIdImportResult,
   SquadFixturesRequest,
   SquadFixturesResponse,
   SubstituteRequest,
@@ -119,6 +120,13 @@ export function useOptimize() {
         solve_time_ms: raw.solve_time_ms,
       } as OptimizationResult;
     },
+  });
+}
+
+/** Import squad by FPL team ID. */
+export function useTeamIdImport() {
+  return useMutation<TeamIdImportResult, Error, number>({
+    mutationFn: (teamId: number) => api.importTeamById(teamId),
   });
 }
 

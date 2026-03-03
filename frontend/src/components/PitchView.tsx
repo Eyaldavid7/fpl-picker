@@ -24,9 +24,11 @@ const positionColors: Record<Position, string> = {
 
 function PitchPlayer({ player, isCaptain, isViceCaptain }: PitchPlayerProps) {
   const color = positionColors[player.position];
+  const isUnavailable = player.status === "i" || player.status === "s" || player.status === "u";
+  const isDoubtful = isUnavailable || player.status === "d" || (player.chance_of_playing != null && player.chance_of_playing < 100);
 
   return (
-    <div className="flex flex-col items-center gap-1 w-16 sm:w-20">
+    <div className="flex flex-col items-center gap-1 w-16 sm:w-20" title={player.news || undefined}>
       {/* Jersey icon */}
       <div className="relative">
         <svg
@@ -62,6 +64,12 @@ function PitchPlayer({ player, isCaptain, isViceCaptain }: PitchPlayerProps) {
             V
           </span>
         )}
+        {/* Availability warning badge */}
+        {isDoubtful && !isCaptain && !isViceCaptain && (
+          <span className={`absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full ${isUnavailable ? "bg-red-500" : "bg-yellow-500"} text-[9px] font-black text-black shadow-md`}>
+            {isUnavailable ? "X" : "!"}
+          </span>
+        )}
       </div>
 
       {/* Player name */}
@@ -69,10 +77,15 @@ function PitchPlayer({ player, isCaptain, isViceCaptain }: PitchPlayerProps) {
         {player.web_name}
       </span>
 
-      {/* Predicted points */}
+      {/* Predicted points + chance of playing */}
       <span className="rounded bg-[var(--primary)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--primary)]">
         {player.predicted_points.toFixed(1)}
       </span>
+      {isDoubtful && (
+        <span className={`rounded px-1 py-0.5 text-[9px] font-semibold leading-none ${isUnavailable ? "bg-red-500/20 text-red-400" : "bg-yellow-500/20 text-yellow-400"}`}>
+          {isUnavailable ? "Out" : player.chance_of_playing != null ? `${player.chance_of_playing}%` : "doubt"}
+        </span>
+      )}
     </div>
   );
 }

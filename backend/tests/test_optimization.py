@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 
 from app.optimization.constraints import (
-    FORMATION_RULES,
     VALID_FORMATIONS,
     validate_squad,
     validate_starting_xi,
@@ -152,14 +151,8 @@ class TestConstraints:
 
     def test_club_limit_violation(self):
         # Manually build a squad that has 4 players from team 1
-        ids = [
-            1, 4,                 # GK
-            7, 9, 10, 12, 15,    # DEF (Saliba=t1)
-            19, 29 - 9, 22, 24, 28,  # MID (Saka=t1, Odegaard=t1 -> id 27)
-            29, 31, 34,
-        ]
         # Actually, let's just build it programmatically
-        squad = self._make_valid_squad()
+        self._make_valid_squad()
         # Force an extra team-1 player in by replacing a non-t1 DEF with t1 DEF
         # squad already has Raya(t1), Saliba(t1), Saka(t1) = 3 from team 1
         # Replace Dalot(t5) with Odegaard(t1,MID) -- wait, that would break positions.

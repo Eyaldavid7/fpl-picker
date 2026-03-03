@@ -10,7 +10,6 @@ Provides both:
 from __future__ import annotations
 
 import logging
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -19,7 +18,6 @@ from app.data.models import (
     POSITION_DEFAULTS,
     Player,
     PlayerHistory,
-    Position,
 )
 
 logger = logging.getLogger(__name__)

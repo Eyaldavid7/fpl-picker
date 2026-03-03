@@ -121,7 +121,7 @@ async def detailed_health_check() -> dict[str, Any]:
     try:
         import pulp
 
-        solver = pulp.PULP_CBC_CMD(msg=0)
+        pulp.PULP_CBC_CMD(msg=0)
         checks["pulp_solver"] = {
             "status": "ok",
             "solver": "PULP_CBC_CMD",

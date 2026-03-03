@@ -18,11 +18,13 @@ const navItems = [
 export default function Navigation() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [prevPathname, setPrevPathname] = useState(pathname);
 
-  // Close drawer on route change
-  useEffect(() => {
+  // Close drawer on route change (React docs pattern: "Adjusting state when a prop changes")
+  if (prevPathname !== pathname) {
+    setPrevPathname(pathname);
     setMobileOpen(false);
-  }, [pathname]);
+  }
 
   // Prevent body scroll when drawer is open
   useEffect(() => {

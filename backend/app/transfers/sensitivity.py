@@ -15,7 +15,6 @@ those that depend heavily on predictions being exactly right.
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
 
 from app.transfers.models import (
     SensitivityResult,
