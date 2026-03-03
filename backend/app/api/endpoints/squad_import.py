@@ -186,6 +186,13 @@ async def import_by_team_id(request: TeamIdImportRequest):
     """
     client = get_fpl_client()
 
+    # --- Invalidate cached entry data so we always get fresh picks ---
+    client.cache.invalidate(f"entry_{request.team_id}")
+    client.cache.invalidate(f"entry_transfers_{request.team_id}")
+    # Invalidate picks for all recent gameweeks (we don't know the GW yet)
+    for gw in range(1, 39):
+        client.cache.invalidate(f"entry_picks_{request.team_id}_gw{gw}")
+
     # --- Fetch team/entry info ---
     try:
         entry = await client.get_entry(request.team_id)
