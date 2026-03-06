@@ -142,9 +142,9 @@ export const api = {
   // Optimization
   optimizeSquad: (data: Record<string, unknown>) =>
     apiClient.post("/optimize/squad", data),
-  selectCaptain: (data: { player_ids: number[]; gameweek: number; differential?: boolean }) =>
+  selectCaptain: (data: { player_ids: number[]; gameweek?: number; differential?: boolean }) =>
     apiClient.post("/optimize/captain", data),
-  optimizeBench: (data: { xi_ids: number[]; bench_ids: number[]; gameweek: number }) =>
+  optimizeBench: (data: { xi_ids: number[]; bench_ids: number[]; gameweek?: number }) =>
     apiClient.post("/optimize/bench", data),
 
   // Fixtures Analysis

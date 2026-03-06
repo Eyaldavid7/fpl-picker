@@ -207,6 +207,17 @@ function TransferCard({ suggestion }: { suggestion: TransferSuggestion }) {
 
   return (
     <div className="fpl-card hover-lift">
+      {/* Hit badge */}
+      {suggestion.is_hit && (
+        <div className="flex items-center gap-1.5 mb-2">
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2.5 py-0.5 text-[10px] font-bold text-amber-400 uppercase tracking-wider">
+            Hit Transfer (-{suggestion.hit_cost} pts)
+          </span>
+          <span className="text-[10px] text-[var(--muted-foreground)]">
+            Net gain: +{formatPoints(suggestion.net_gain_after_hit)} pts
+          </span>
+        </div>
+      )}
       <div className="flex items-center gap-3">
         {/* OUT section */}
         <div className="flex-1 min-w-0 rounded-lg border border-red-500/20 bg-red-500/5 p-3">
@@ -621,14 +632,28 @@ export default function TeamSuggestions({
                     <div className="flex items-center gap-2">
                       <TrendingUp className="h-4 w-4 text-[var(--primary)]" />
                       <span className="text-sm font-medium text-[var(--foreground)]">
-                        Total Point Gain
+                        {transferSuggestions.hit_transfers_count > 0
+                          ? "Net Gain (after hits)"
+                          : "Total Point Gain"}
                       </span>
                       <span className="text-sm font-bold text-green-400">
-                        +{formatPoints(transferSuggestions.total_point_gain)} pts
+                        +{formatPoints(
+                          transferSuggestions.hit_transfers_count > 0
+                            ? transferSuggestions.net_gain_after_hits
+                            : transferSuggestions.total_point_gain
+                        )} pts
                       </span>
                     </div>
 
                     <div className="flex items-center gap-4 text-sm">
+                      {transferSuggestions.hit_transfers_count > 0 && (
+                        <span className="text-amber-400">
+                          Hits:{" "}
+                          <span className="font-semibold">
+                            {transferSuggestions.hit_transfers_count} (-{transferSuggestions.total_hit_cost} pts)
+                          </span>
+                        </span>
+                      )}
                       <span className="text-[var(--muted-foreground)]">
                         Net Cost:{" "}
                         <span

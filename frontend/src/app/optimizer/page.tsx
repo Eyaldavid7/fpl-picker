@@ -31,14 +31,20 @@ import {
   useSquadFixtures,
   useSubstituteSuggestions,
   useTransferSuggestions,
+  useCaptainPicker,
+  useBenchOptimizer,
 } from "@/hooks/useApi";
-import { useSaveTeam } from "@/hooks/useFirestore";
+import { useSaveTeam, useUpsertTeam } from "@/hooks/useFirestore";
 import { friendlyErrorMessage, getApiBaseUrl } from "@/lib/api-client";
 import type {
   OptimizationMethod,
   OptimizationResult,
   MatchedPlayer,
   TeamIdImportResult,
+  SquadPlayer,
+  SquadFixturesResponse,
+  CaptainResponse,
+  BenchOrderResponse,
 } from "@/types";
 
 const formations = [
@@ -63,6 +69,25 @@ function confidenceBg(confidence: number): string {
   return "bg-red-500/10 border-red-500/30";
 }
 
+/** Enrich squad players with next-opponent and FDR data from the squad fixtures response. */
+function enrichWithFixtures(
+  players: SquadPlayer[],
+  fixturesData: SquadFixturesResponse | undefined
+): SquadPlayer[] {
+  if (!fixturesData?.fixtures) return players;
+  return players.map((p) => {
+    const pFixtures = fixturesData.fixtures[String(p.player_id)];
+    const next = pFixtures?.[0];
+    if (!next) return { ...p, next_opponent: null, fdr: null };
+    const venue = next.is_home ? "(H)" : "(A)";
+    return {
+      ...p,
+      next_opponent: `${next.opponent_name} ${venue}`,
+      fdr: next.difficulty,
+    };
+  });
+}
+
 export default function OptimizerPage() {
   const [budget, setBudget] = useState(100);
   const [formation, setFormation] = useState("4-4-2");
@@ -75,19 +100,29 @@ export default function OptimizerPage() {
   } | null>(null);
 
   const [teamId, setTeamId] = useState("");
-  const [autoLoading, setAutoLoading] = useState(false);
   const [loadedTeamLabel, setLoadedTeamLabel] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const updateFileInputRef = useRef<HTMLInputElement>(null);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [teamDisplayOverride, setTeamDisplayOverride] = useState<{
+    players: MatchedPlayer[];
+    startingXi: number[];
+    bench: number[];
+  } | null>(null);
   // Guard: when user manually loads a different team, ignore pending auto-load results
   const manuallyLoadedRef = useRef(false);
   const optimize = useOptimize();
   const teamIdImport = useTeamIdImport();
   const screenshotImport = useScreenshotImport();
+  const screenshotUpdate = useScreenshotImport(); // Second instance for update-with-screenshot flow
   const squadFixtures = useSquadFixtures();
   const substituteSuggestions = useSubstituteSuggestions();
   const transferSuggestions = useTransferSuggestions();
+  const captainPicker = useCaptainPicker();
+  const benchOptimizer = useBenchOptimizer();
   const saveTeam = useSaveTeam();
+  const upsertTeam = useUpsertTeam();
 
   const handleOptimize = () => {
     optimize.mutate({
@@ -101,7 +136,15 @@ export default function OptimizerPage() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    screenshotImport.mutate(file);
+    screenshotImport.mutate(file, {
+      onSuccess: (data) => {
+        // Auto-load matched players
+        const ids = data.players
+          .filter((p: MatchedPlayer) => p.player_id !== null)
+          .map((p: MatchedPlayer) => p.player_id as number);
+        setImportedPlayerIds(ids);
+      },
+    });
     // Reset input so re-uploading the same file triggers onChange
     e.target.value = "";
   };
@@ -119,6 +162,8 @@ export default function OptimizerPage() {
     if (isNaN(parsed) || parsed <= 0) return;
     manuallyLoadedRef.current = true; // Prevent auto-load from overwriting
     setLoadedTeamLabel(null); // Clear saved-team label when importing by ID
+    setTeamDisplayOverride(null); // Reset any screenshot merge override
+    setUpdateMessage(null);
     teamIdImport.mutate(parsed, {
       onSuccess: (data) => {
         localStorage.setItem("fpl-team-id", parsed.toString());
@@ -129,6 +174,67 @@ export default function OptimizerPage() {
         setImportedPlayerIds(ids);
       },
     });
+  };
+
+  const handleScreenshotUpdate = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !teamIdImport.data) return;
+    setUpdateMessage(null);
+    screenshotUpdate.mutate(file, {
+      onSuccess: (data) => {
+        const teamData = teamIdImport.data!;
+        const matched = data.players.filter(
+          (p: MatchedPlayer) => p.player_id !== null
+        );
+
+        if (matched.length === 0) {
+          setUpdateMessage("Could not detect any players from the screenshot.");
+          return;
+        }
+
+        // Screenshot shows the team as-is: first 11 = Starting XI, rest = bench
+        const xiPlayers = matched.slice(0, 11);
+        const benchPlayers = matched.slice(11);
+
+        // Fully overwrite the displayed team with screenshot results
+        setTeamDisplayOverride({
+          players: matched,
+          startingXi: xiPlayers.map((p: MatchedPlayer) => p.player_id as number),
+          bench: benchPlayers.map((p: MatchedPlayer) => p.player_id as number),
+        });
+
+        // Update IDs used for optimization/suggestions
+        const updatedIds = matched.map((p: MatchedPlayer) => p.player_id as number);
+        setImportedPlayerIds(updatedIds);
+
+        setUpdateMessage(
+          `Squad overwritten from screenshot: ${matched.length} players detected.`
+        );
+
+        // Auto-save (upsert by FPL team ID — updates existing, doesn't create duplicate)
+        const fplId = parseInt(teamId, 10);
+        if (fplId > 0) {
+          const name = teamData.team_name || `Team ${teamId}`;
+          upsertTeam.mutate({
+            fplTeamId: fplId,
+            team: {
+              name: `${name} - GW${teamData.gameweek}`,
+              playerIds: updatedIds,
+              players: matched.map((p: MatchedPlayer) => ({
+                id: p.player_id as number,
+                name: p.web_name || p.extracted_name,
+                position: p.position || "MID",
+                teamName: p.team_name || "",
+              })),
+              formation,
+              source: "import",
+              fplTeamId: fplId,
+            },
+          });
+        }
+      },
+    });
+    e.target.value = "";
   };
 
   const handleForgetTeam = () => {
@@ -192,7 +298,7 @@ export default function OptimizerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importedPlayerIds]);
 
-  // Auto-fetch substitute suggestions when optimization result arrives
+  // Auto-fetch substitute suggestions + captain picker when optimization result arrives
   useEffect(() => {
     if (optimize.data?.squad?.length) {
       const playerIds = optimize.data.squad.map((p) => p.player_id);
@@ -200,6 +306,13 @@ export default function OptimizerPage() {
         squad_player_ids: playerIds,
         formation: optimize.data.formation,
       });
+      captainPicker.mutate({ player_ids: playerIds });
+      // Auto-trigger bench optimizer
+      const xiIds = optimize.data.squad.filter((p) => p.is_starter).map((p) => p.player_id);
+      const benchIds = optimize.data.squad.filter((p) => !p.is_starter).map((p) => p.player_id);
+      if (benchIds.length > 0) {
+        benchOptimizer.mutate({ xi_ids: xiIds, bench_ids: benchIds });
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [optimize.data]);
@@ -211,33 +324,34 @@ export default function OptimizerPage() {
         squad_player_ids: importedPlayerIds,
         formation,
       });
+      // Auto-trigger captain picker
+      captainPicker.mutate({ player_ids: importedPlayerIds });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importedPlayerIds]);
 
-  // Auto-load saved team ID on mount
+  // Restore last squad from localStorage on mount (no API call)
   useEffect(() => {
-    const savedId = localStorage.getItem("fpl-team-id");
-    if (savedId) {
-      const parsed = parseInt(savedId, 10);
-      if (!isNaN(parsed) && parsed > 0) {
-        setTeamId(savedId);
-        setAutoLoading(true);
-        teamIdImport.mutate(parsed, {
-          onSuccess: (data) => {
-            // If user already loaded a different team, don't overwrite
-            if (manuallyLoadedRef.current) return;
-            const ids = data.players
-              .filter((p: MatchedPlayer) => p.player_id !== null)
-              .map((p: MatchedPlayer) => p.player_id as number);
-            setImportedPlayerIds(ids);
-          },
-          onSettled: () => setAutoLoading(false),
-        });
-      }
+    const savedIds = localStorage.getItem("fpl-squad-ids");
+    if (savedIds) {
+      try {
+        const ids = JSON.parse(savedIds) as number[];
+        if (Array.isArray(ids) && ids.length > 0) {
+          setImportedPlayerIds(ids);
+        }
+      } catch { /* ignore corrupt data */ }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Pre-fill team ID input if saved
+    const savedTeamId = localStorage.getItem("fpl-team-id");
+    if (savedTeamId) setTeamId(savedTeamId);
   }, []);
+
+  // Persist squad IDs to localStorage whenever they change
+  useEffect(() => {
+    if (importedPlayerIds.length > 0) {
+      localStorage.setItem("fpl-squad-ids", JSON.stringify(importedPlayerIds));
+    }
+  }, [importedPlayerIds]);
 
   const handleFetchTransfers = (budgetRemaining: number, freeTransfers: number) => {
     const playerIds =
@@ -253,26 +367,16 @@ export default function OptimizerPage() {
 
   const handleLoadTeam = useCallback(
     (playerIds: number[], teamName?: string, savedFplTeamId?: number) => {
-      // Prevent any in-flight auto-load from overwriting this
       manuallyLoadedRef.current = true;
       setImportedPlayerIds(playerIds);
       setLoadedTeamLabel(teamName || `Saved team (${playerIds.length} players)`);
-
+      // Pre-fill team ID but don't auto-call API — user can import manually if needed
       if (savedFplTeamId) {
         setTeamId(savedFplTeamId.toString());
-        teamIdImport.mutate(savedFplTeamId, {
-          onSuccess: (data) => {
-            const ids = data.players
-              .filter((p: MatchedPlayer) => p.player_id !== null)
-              .map((p: MatchedPlayer) => p.player_id as number);
-            setImportedPlayerIds(ids);
-          },
-        });
       } else {
-        // Reset team ID import state so the old team card disappears
-        teamIdImport.reset();
         setTeamId("");
       }
+      teamIdImport.reset();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
@@ -345,6 +449,11 @@ export default function OptimizerPage() {
       }
     );
   };
+
+  // Effective display data (merged after screenshot update, or original import)
+  const effectivePlayers = teamDisplayOverride?.players ?? teamIdImport.data?.players ?? [];
+  const effectiveStartingXi = teamDisplayOverride?.startingXi ?? teamIdImport.data?.starting_xi ?? [];
+  const effectiveBench = teamDisplayOverride?.bench ?? teamIdImport.data?.bench ?? [];
 
   const hasSquadData =
     (optimize.data?.squad?.length ?? 0) > 0 || importedPlayerIds.length > 0;
@@ -443,557 +552,6 @@ export default function OptimizerPage() {
             </button>
           </div>
         </div>
-      </div>
-
-      {/* Import squad by Team ID */}
-      <div className="fpl-card">
-        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-          <Hash className="h-5 w-5 text-[var(--primary)]" />
-          Import Your Squad by Team ID
-        </h2>
-        <p className="text-sm text-[var(--muted-foreground)] mb-4">
-          Enter your FPL Team ID to import your current squad directly from the
-          FPL API. You can find your Team ID in the URL when viewing your team
-          on the official FPL site.
-        </p>
-
-        {autoLoading && (
-          <div className="mb-4 flex items-center gap-2 text-sm text-[var(--primary)]">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Auto-loading your saved team...
-          </div>
-        )}
-
-        <div className="flex flex-col sm:flex-row gap-3">
-          <input
-            type="text"
-            inputMode="numeric"
-            pattern="[0-9]*"
-            placeholder="e.g. 123456"
-            value={teamId}
-            onChange={(e) => setTeamId(e.target.value.replace(/\D/g, ""))}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleTeamIdImport();
-            }}
-            className="fpl-select flex-1 sm:max-w-xs"
-          />
-          <button
-            onClick={handleTeamIdImport}
-            disabled={
-              teamIdImport.isPending || !teamId || parseInt(teamId, 10) <= 0
-            }
-            className="fpl-button-primary gap-2 w-full sm:w-auto"
-          >
-            {teamIdImport.isPending ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Importing...
-              </>
-            ) : (
-              <>
-                <Upload className="h-4 w-4" />
-                Import
-              </>
-            )}
-          </button>
-          {typeof window !== "undefined" && localStorage.getItem("fpl-team-id") && (
-            <button
-              onClick={handleForgetTeam}
-              className="text-xs text-[var(--muted-foreground)] hover:text-red-400 transition-colors underline underline-offset-2 w-full sm:w-auto text-center"
-            >
-              Forget saved team
-            </button>
-          )}
-        </div>
-
-        {/* Team ID import error */}
-        {teamIdImport.isError && (
-          <div className="mt-4 p-3 rounded-lg bg-red-500/5 border border-red-500/30 text-red-400 text-sm flex items-start gap-2">
-            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-            <div>
-              <p className="whitespace-pre-line">
-                {friendlyErrorMessage(teamIdImport.error)}
-              </p>
-              <p className="text-xs mt-1 text-red-400/60">
-                API URL: {getApiBaseUrl()}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Team ID import results */}
-        {teamIdImport.data && !teamIdImport.isPending && (
-          <div className="mt-4 space-y-4">
-            {/* Team info card */}
-            <div className="rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/5 p-4">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Team Name
-                  </p>
-                  <p className="text-sm font-bold mt-0.5">
-                    {teamIdImport.data.team_name}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Manager
-                  </p>
-                  <p className="text-sm font-bold mt-0.5">
-                    {teamIdImport.data.manager_name}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Gameweek
-                  </p>
-                  <p className="text-sm font-bold mt-0.5">
-                    GW{teamIdImport.data.gameweek}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Overall Rank
-                  </p>
-                  <p className="text-sm font-bold mt-0.5">
-                    {teamIdImport.data.overall_rank.toLocaleString()}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Bank
-                  </p>
-                  <p className="text-sm font-bold mt-0.5">
-                    {teamIdImport.data.bank.toFixed(1)}m
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Team Value
-                  </p>
-                  <p className="text-sm font-bold mt-0.5">
-                    {teamIdImport.data.team_value.toFixed(1)}m
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3 text-xs text-[var(--muted-foreground)]">
-                Overall Points: {teamIdImport.data.overall_points.toLocaleString()}
-              </div>
-            </div>
-
-            {/* Player count summary */}
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-[var(--muted-foreground)]">
-                {teamIdImport.data.players.filter((p: MatchedPlayer) => p.player_id !== null).length}{" "}
-                players matched
-              </p>
-              {importedPlayerIds.length > 0 && (
-                <span className="text-xs text-green-400 flex items-center gap-1">
-                  <CheckCircle2 className="h-3 w-3" />
-                  Squad loaded
-                </span>
-              )}
-            </div>
-
-            {/* Starting XI */}
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="h-1 w-4 rounded bg-[var(--primary)]" />
-                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--primary)]">
-                  Starting XI
-                </span>
-                <span className="text-xs text-[var(--muted-foreground)]">
-                  ({teamIdImport.data.starting_xi.length} players)
-                </span>
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {teamIdImport.data.players
-                  .filter((p: MatchedPlayer) =>
-                    teamIdImport.data!.starting_xi.includes(p.player_id as number)
-                  )
-                  .map((player: MatchedPlayer, idx: number) => (
-                    <div
-                      key={idx}
-                      className={`rounded-lg border p-3 ${confidenceBg(player.confidence)}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="font-medium text-sm flex items-center gap-1.5">
-                            {player.web_name || player.extracted_name}
-                            {player.player_id === teamIdImport.data!.captain_id && (
-                              <span className="inline-flex items-center gap-0.5 fpl-badge bg-[var(--primary)]/20 text-[var(--primary)] text-[10px]">
-                                <Star className="h-3 w-3" />
-                                C
-                              </span>
-                            )}
-                            {player.player_id === teamIdImport.data!.vice_captain_id && (
-                              <span className="inline-flex items-center gap-0.5 fpl-badge bg-[var(--accent)]/20 text-[var(--accent)] text-[10px]">
-                                <ShieldCheck className="h-3 w-3" />
-                                VC
-                              </span>
-                            )}
-                          </p>
-                          <div className="flex items-center gap-2 mt-1">
-                            {player.position && (
-                              <span
-                                className={`fpl-badge fpl-badge-${player.position.toLowerCase()} text-xs`}
-                              >
-                                {player.position}
-                              </span>
-                            )}
-                            {player.team_name && (
-                              <span className="text-xs text-[var(--muted-foreground)]">
-                                {player.team_name}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <span className={`text-sm font-bold ${confidenceColor(player.confidence)}`}>
-                          {Math.round(player.confidence * 100)}%
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-
-            {/* Bench */}
-            {teamIdImport.data.bench.length > 0 && (
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-1 w-4 rounded bg-[var(--muted-foreground)]" />
-                  <span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Substitutes
-                  </span>
-                  <span className="text-xs text-[var(--muted-foreground)]">
-                    ({teamIdImport.data.bench.length} players)
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                  {teamIdImport.data.players
-                    .filter((p: MatchedPlayer) =>
-                      teamIdImport.data!.bench.includes(p.player_id as number)
-                    )
-                    .map((player: MatchedPlayer, idx: number) => (
-                      <div
-                        key={idx}
-                        className={`rounded-lg border p-3 opacity-70 ${confidenceBg(player.confidence)}`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="font-medium text-sm">
-                              {player.web_name || player.extracted_name}
-                            </p>
-                            <div className="flex items-center gap-2 mt-1">
-                              {player.position && (
-                                <span
-                                  className={`fpl-badge fpl-badge-${player.position.toLowerCase()} text-xs`}
-                                >
-                                  {player.position}
-                                </span>
-                              )}
-                              {player.team_name && (
-                                <span className="text-xs text-[var(--muted-foreground)]">
-                                  {player.team_name}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex flex-col items-end gap-1">
-                            <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)] bg-[var(--muted)]/40 px-1.5 py-0.5 rounded">
-                              Bench
-                            </span>
-                            <span className={`text-sm font-bold ${confidenceColor(player.confidence)}`}>
-                              {Math.round(player.confidence * 100)}%
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              </div>
-            )}
-
-            <div className="flex flex-wrap gap-3">
-              <button
-                onClick={handleUseTeamIdSquad}
-                disabled={
-                  teamIdImport.data.players.filter(
-                    (p: MatchedPlayer) => p.player_id !== null
-                  ).length === 0
-                }
-                className="fpl-button-primary gap-2 w-full sm:w-auto"
-              >
-                <Cpu className="h-4 w-4" />
-                Optimize with This Squad
-              </button>
-
-              <button
-                onClick={handleSaveTeamIdTeam}
-                disabled={
-                  teamIdImport.data.players.filter(
-                    (p: MatchedPlayer) => p.player_id !== null
-                  ).length === 0 || saveTeam.isPending
-                }
-                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto justify-center"
-              >
-                {saveTeam.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4" />
-                )}
-                Save Team
-              </button>
-            </div>
-
-            {/* Inline save feedback */}
-            {saveMessage && (
-              <p
-                className={`text-sm mt-2 ${saveMessage.type === "success"
-                    ? "text-emerald-400"
-                    : "text-red-400"
-                  }`}
-              >
-                {saveMessage.text}
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* Loaded from saved teams indicator */}
-        {!teamIdImport.data && loadedTeamLabel && importedPlayerIds.length > 0 && (
-          <div className="mt-4 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/5 p-4 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="h-5 w-5 text-[var(--primary)]" />
-              <div>
-                <p className="text-sm font-semibold text-[var(--foreground)]">
-                  {loadedTeamLabel}
-                </p>
-                <p className="text-xs text-[var(--muted-foreground)]">
-                  {importedPlayerIds.length} players loaded — suggestions updating below
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Import squad from screenshot */}
-      <div className="fpl-card">
-        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-          <Camera className="h-5 w-5 text-[var(--primary)]" />
-          Or Upload Screenshot
-        </h2>
-        <p className="text-sm text-[var(--muted-foreground)] mb-4">
-          Upload a screenshot of your FPL team and we&apos;ll detect your players automatically.
-        </p>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          onChange={handleFileChange}
-          className="hidden"
-        />
-
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={screenshotImport.isPending}
-          className="fpl-button-primary gap-2"
-        >
-          {screenshotImport.isPending ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Analyzing Screenshot...
-            </>
-          ) : (
-            <>
-              <Upload className="h-4 w-4" />
-              Upload Screenshot
-            </>
-          )}
-        </button>
-
-        {/* Import error */}
-        {screenshotImport.isError && (
-          <div className="mt-4 p-3 rounded-lg bg-red-500/5 border border-red-500/30 text-red-400 text-sm flex items-start gap-2">
-            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-            <div>
-              <p className="whitespace-pre-line">
-                {friendlyErrorMessage(screenshotImport.error)}
-              </p>
-              <p className="text-xs mt-1 text-red-400/60">
-                API URL: {getApiBaseUrl()}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Matched players grid */}
-        {screenshotImport.data && !screenshotImport.isPending && (
-          <div className="mt-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <p className="text-sm text-[var(--muted-foreground)]">
-                Matched {screenshotImport.data.matched_count} of{" "}
-                {screenshotImport.data.extracted_count} detected players
-              </p>
-              {importedPlayerIds.length > 0 && (
-                <span className="text-xs text-green-400 flex items-center gap-1">
-                  <CheckCircle2 className="h-3 w-3" />
-                  Squad loaded
-                </span>
-              )}
-            </div>
-
-            {/* Starting XI */}
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="h-1 w-4 rounded bg-[var(--primary)]" />
-                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--primary)]">
-                  Starting XI
-                </span>
-                <span className="text-xs text-[var(--muted-foreground)]">
-                  ({Math.min(11, screenshotImport.data.players.length)} players)
-                </span>
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {screenshotImport.data.players.slice(0, 11).map((player: MatchedPlayer, idx: number) => (
-                  <div
-                    key={idx}
-                    className={`rounded-lg border p-3 ${confidenceBg(player.confidence)}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-medium text-sm">
-                          {player.web_name || player.extracted_name}
-                        </p>
-                        {player.web_name && player.web_name !== player.extracted_name && (
-                          <p className="text-xs text-[var(--muted-foreground)]">
-                            from &quot;{player.extracted_name}&quot;
-                          </p>
-                        )}
-                        <div className="flex items-center gap-2 mt-1">
-                          {player.position && (
-                            <span
-                              className={`fpl-badge fpl-badge-${player.position.toLowerCase()} text-xs`}
-                            >
-                              {player.position}
-                            </span>
-                          )}
-                          {player.team_name && (
-                            <span className="text-xs text-[var(--muted-foreground)]">
-                              {player.team_name}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <span className={`text-sm font-bold ${confidenceColor(player.confidence)}`}>
-                        {Math.round(player.confidence * 100)}%
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Substitutes */}
-            {screenshotImport.data.players.length > 11 && (
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-1 w-4 rounded bg-[var(--muted-foreground)]" />
-                  <span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                    Substitutes
-                  </span>
-                  <span className="text-xs text-[var(--muted-foreground)]">
-                    ({screenshotImport.data.players.length - 11} players)
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                  {screenshotImport.data.players.slice(11).map((player: MatchedPlayer, idx: number) => (
-                    <div
-                      key={idx + 11}
-                      className={`rounded-lg border p-3 opacity-70 ${confidenceBg(player.confidence)}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="font-medium text-sm">
-                            {player.web_name || player.extracted_name}
-                          </p>
-                          {player.web_name && player.web_name !== player.extracted_name && (
-                            <p className="text-xs text-[var(--muted-foreground)]">
-                              from &quot;{player.extracted_name}&quot;
-                            </p>
-                          )}
-                          <div className="flex items-center gap-2 mt-1">
-                            {player.position && (
-                              <span
-                                className={`fpl-badge fpl-badge-${player.position.toLowerCase()} text-xs`}
-                              >
-                                {player.position}
-                              </span>
-                            )}
-                            {player.team_name && (
-                              <span className="text-xs text-[var(--muted-foreground)]">
-                                {player.team_name}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex flex-col items-end gap-1">
-                          <span className="text-[10px] font-medium uppercase tracking-wider text-[var(--muted-foreground)] bg-[var(--muted)]/40 px-1.5 py-0.5 rounded">
-                            Bench
-                          </span>
-                          <span className={`text-sm font-bold ${confidenceColor(player.confidence)}`}>
-                            {Math.round(player.confidence * 100)}%
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="flex flex-wrap gap-3">
-              <button
-                onClick={handleUseImportedSquad}
-                disabled={screenshotImport.data.matched_count === 0}
-                className="fpl-button-primary gap-2 w-full sm:w-auto"
-              >
-                <Cpu className="h-4 w-4" />
-                Optimize with This Squad
-              </button>
-
-              <button
-                onClick={handleSaveImportedTeam}
-                disabled={
-                  screenshotImport.data.matched_count === 0 ||
-                  saveTeam.isPending
-                }
-                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto justify-center"
-              >
-                {saveTeam.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Save className="h-4 w-4" />
-                )}
-                Save Imported Team
-              </button>
-            </div>
-
-            {/* Inline save feedback */}
-            {saveMessage && (
-              <p
-                className={`text-sm mt-2 ${saveMessage.type === "success"
-                    ? "text-emerald-400"
-                    : "text-red-400"
-                  }`}
-              >
-                {saveMessage.text}
-              </p>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Saved teams */}
@@ -1104,7 +662,7 @@ export default function OptimizerPage() {
               <h2 className="text-lg font-semibold">Starting XI</h2>
             </div>
             <PitchView
-              players={result.squad}
+              players={enrichWithFixtures(result.squad, squadFixtures.data)}
               formation={result.formation}
               captainId={result.captain?.player_id ?? null}
               viceCaptainId={result.vice_captain?.player_id ?? null}
@@ -1115,7 +673,7 @@ export default function OptimizerPage() {
           <div className="fpl-card">
             <h2 className="text-lg font-semibold mb-4">Bench</h2>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              {result.bench.map((player) => (
+              {enrichWithFixtures(result.bench, squadFixtures.data).map((player) => (
                 <PlayerCard
                   key={player.player_id}
                   name={player.web_name}
@@ -1123,6 +681,8 @@ export default function OptimizerPage() {
                   position={player.position}
                   price={player.cost}
                   predictedPoints={player.predicted_points}
+                  nextOpponent={player.next_opponent}
+                  fdr={player.fdr}
                   compact
                 />
               ))}
@@ -1335,6 +895,116 @@ export default function OptimizerPage() {
         </>
       )}
 
+      {/* Captain Picker - shown when data is available */}
+      {captainPicker.data && !captainPicker.isPending && (
+        <div className="fpl-card animate-fade-in">
+          <div className="flex items-center gap-2 mb-4">
+            <Star className="h-5 w-5 text-[var(--primary)]" />
+            <h2 className="text-lg font-semibold">Captain Picker</h2>
+          </div>
+
+          {/* Top pick */}
+          {captainPicker.data.rankings.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+              <div className="rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/5 p-4">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--primary)] mb-1">Captain</p>
+                <p className="font-bold text-lg">{captainPicker.data.rankings[0].web_name}</p>
+                <div className="flex items-center gap-2 mt-1 text-xs text-[var(--muted-foreground)]">
+                  <span className={`fpl-badge fpl-badge-${captainPicker.data.rankings[0].position.toLowerCase()}`}>
+                    {captainPicker.data.rankings[0].position}
+                  </span>
+                  <span>{captainPicker.data.rankings[0].team_name}</span>
+                  {captainPicker.data.rankings[0].opponent && <span>vs {captainPicker.data.rankings[0].opponent}</span>}
+                </div>
+                <p className="text-sm font-bold text-[var(--primary)] mt-2">
+                  {captainPicker.data.captain_xpts.toFixed(1)} xPts
+                </p>
+              </div>
+              {captainPicker.data.rankings.length > 1 && (
+                <div className="rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/5 p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--accent)] mb-1">Vice Captain</p>
+                  <p className="font-bold text-lg">{captainPicker.data.rankings[1].web_name}</p>
+                  <div className="flex items-center gap-2 mt-1 text-xs text-[var(--muted-foreground)]">
+                    <span className={`fpl-badge fpl-badge-${captainPicker.data.rankings[1].position.toLowerCase()}`}>
+                      {captainPicker.data.rankings[1].position}
+                    </span>
+                    <span>{captainPicker.data.rankings[1].team_name}</span>
+                    {captainPicker.data.rankings[1].opponent && <span>vs {captainPicker.data.rankings[1].opponent}</span>}
+                  </div>
+                  <p className="text-sm font-bold text-[var(--accent)] mt-2">
+                    {captainPicker.data.vice_captain_xpts.toFixed(1)} xPts
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Full rankings table */}
+          {captainPicker.data.rankings.length > 2 && (
+            <div className="overflow-x-auto">
+              <table className="fpl-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Player</th>
+                    <th>Pos</th>
+                    <th>Team</th>
+                    <th>Opponent</th>
+                    <th>xPts</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {captainPicker.data.rankings.slice(0, 8).map((r, idx) => (
+                    <tr key={r.player_id} className={idx < 2 ? "bg-[var(--primary)]/5" : ""}>
+                      <td className="font-bold text-[var(--muted-foreground)]">{idx + 1}</td>
+                      <td className="font-medium">{r.web_name}</td>
+                      <td>
+                        <span className={`fpl-badge fpl-badge-${r.position.toLowerCase()}`}>
+                          {r.position}
+                        </span>
+                      </td>
+                      <td className="text-[var(--muted-foreground)]">{r.team_name}</td>
+                      <td className="text-[var(--muted-foreground)]">{r.opponent || "--"}</td>
+                      <td className="text-[var(--primary)] font-semibold">{r.predicted_points.toFixed(1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bench Optimizer - shown when data is available */}
+      {benchOptimizer.data && !benchOptimizer.isPending && benchOptimizer.data.bench_players.length > 0 && (
+        <div className="fpl-card animate-fade-in">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="h-5 w-5 text-[var(--accent)]" />
+              <h2 className="text-lg font-semibold">Optimal Bench Order</h2>
+            </div>
+            <span className="text-xs text-[var(--muted-foreground)]">
+              Expected auto-sub: <span className="font-semibold text-[var(--accent)]">{benchOptimizer.data.expected_auto_sub_points.toFixed(2)} pts</span>
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {benchOptimizer.data.bench_players.map((bp, idx) => (
+              <div key={bp.player_id} className="rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-[var(--muted)] text-[10px] font-bold text-[var(--muted-foreground)]">
+                    {idx + 1}
+                  </span>
+                  <span className={`fpl-badge fpl-badge-${bp.position.toLowerCase()}`}>{bp.position}</span>
+                </div>
+                <p className="font-semibold truncate">{bp.web_name}</p>
+                <p className="text-xs text-[var(--muted-foreground)] mt-0.5">{bp.opponent || "No fixture"}</p>
+                <p className="text-sm font-bold text-[var(--accent)] mt-1">{bp.final_score.toFixed(1)} xPts</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Team Suggestions - shown when squad data is available */}
       {hasSquadData && (
         <TeamSuggestions
@@ -1348,7 +1018,7 @@ export default function OptimizerPage() {
       )}
 
       {/* Empty state */}
-      {!result && !optimize.isPending && !optimize.isError && (
+      {!result && !optimize.isPending && !optimize.isError && !hasSquadData && (
         <div className="fpl-card flex flex-col items-center justify-center py-16 text-center">
           <Cpu className="h-12 w-12 text-[var(--muted-foreground)]" />
           <h3 className="mt-4 text-lg font-semibold">
@@ -1361,6 +1031,171 @@ export default function OptimizerPage() {
           </p>
         </div>
       )}
+
+      {/* Import squad by Team ID */}
+      <div className="fpl-card">
+        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <Hash className="h-5 w-5 text-[var(--primary)]" />
+          Import / Update Squad
+        </h2>
+        <p className="text-sm text-[var(--muted-foreground)] mb-4">
+          Import your squad by FPL Team ID, or upload a screenshot to update your current team.
+        </p>
+
+        <div className="flex flex-col sm:flex-row gap-3">
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            placeholder="FPL Team ID e.g. 123456"
+            value={teamId}
+            onChange={(e) => setTeamId(e.target.value.replace(/\D/g, ""))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleTeamIdImport();
+            }}
+            className="fpl-select flex-1 sm:max-w-xs"
+          />
+          <button
+            onClick={handleTeamIdImport}
+            disabled={
+              teamIdImport.isPending || !teamId || parseInt(teamId, 10) <= 0
+            }
+            className="fpl-button-primary gap-2 w-full sm:w-auto"
+          >
+            {teamIdImport.isPending ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Importing...
+              </>
+            ) : (
+              <>
+                <Upload className="h-4 w-4" />
+                Import by ID
+              </>
+            )}
+          </button>
+
+          {/* Upload Screenshot */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={screenshotImport.isPending}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold bg-blue-500/15 text-blue-400 border border-blue-500/30 hover:bg-blue-500/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto justify-center"
+          >
+            {screenshotImport.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Camera className="h-4 w-4" />
+            )}
+            {screenshotImport.isPending ? "Analyzing..." : "Upload Screenshot"}
+          </button>
+
+          {/* Update with Screenshot (only after team ID import) */}
+          {teamIdImport.data && (
+            <>
+              <input
+                ref={updateFileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={handleScreenshotUpdate}
+                className="hidden"
+              />
+              <button
+                onClick={() => updateFileInputRef.current?.click()}
+                disabled={screenshotUpdate.isPending}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold bg-purple-500/15 text-purple-400 border border-purple-500/30 hover:bg-purple-500/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed w-full sm:w-auto justify-center"
+              >
+                {screenshotUpdate.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Camera className="h-4 w-4" />
+                )}
+                {screenshotUpdate.isPending ? "Updating..." : "Update with Screenshot"}
+              </button>
+            </>
+          )}
+
+          {typeof window !== "undefined" && localStorage.getItem("fpl-team-id") && (
+            <button
+              onClick={handleForgetTeam}
+              className="text-xs text-[var(--muted-foreground)] hover:text-red-400 transition-colors underline underline-offset-2 w-full sm:w-auto text-center"
+            >
+              Forget saved ID
+            </button>
+          )}
+        </div>
+
+        {/* Import errors */}
+        {teamIdImport.isError && (
+          <div className="mt-4 p-3 rounded-lg bg-red-500/5 border border-red-500/30 text-red-400 text-sm flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+            <p className="whitespace-pre-line">
+              {friendlyErrorMessage(teamIdImport.error)}
+            </p>
+          </div>
+        )}
+        {screenshotImport.isError && (
+          <div className="mt-4 p-3 rounded-lg bg-red-500/5 border border-red-500/30 text-red-400 text-sm flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+            <p className="whitespace-pre-line">
+              {friendlyErrorMessage(screenshotImport.error)}
+            </p>
+          </div>
+        )}
+
+        {/* Team ID import result summary */}
+        {teamIdImport.data && !teamIdImport.isPending && (
+          <div className="mt-4 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/5 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-bold">
+                  {teamIdImport.data.team_name} — {teamIdImport.data.manager_name}
+                </p>
+                <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
+                  GW{teamIdImport.data.gameweek} · Rank {teamIdImport.data.overall_rank.toLocaleString()} · Bank {teamIdImport.data.bank.toFixed(1)}m · Value {teamIdImport.data.team_value.toFixed(1)}m
+                </p>
+              </div>
+              <span className="text-xs text-green-400 flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" />
+                {effectivePlayers.filter((p: MatchedPlayer) => p.player_id !== null).length} players loaded
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Screenshot import result */}
+        {screenshotImport.data && !screenshotImport.isPending && !teamIdImport.data && (
+          <div className="mt-4 rounded-lg border border-blue-500/30 bg-blue-500/5 p-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-bold">
+                Screenshot: {screenshotImport.data.matched_count} of {screenshotImport.data.extracted_count} players matched
+              </p>
+              <span className="text-xs text-green-400 flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3" />
+                Squad loaded
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Screenshot update feedback */}
+        {updateMessage && (
+          <p className="text-sm mt-3 text-blue-400">{updateMessage}</p>
+        )}
+
+        {/* Save feedback */}
+        {saveMessage && (
+          <p className={`text-sm mt-2 ${saveMessage.type === "success" ? "text-emerald-400" : "text-red-400"}`}>
+            {saveMessage.text}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

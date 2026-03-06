@@ -22,6 +22,8 @@ class SquadPlayer(BaseModel):
         is_starter: Whether the player is in the starting XI.
         is_captain: Whether the player is the captain.
         is_vice_captain: Whether the player is the vice-captain.
+        next_opponent: Next fixture opponent, e.g. "Arsenal (A)" or "Chelsea (H)".
+        fdr: Fixture Difficulty Rating 1-5 for the next match.
     """
 
     player_id: int
@@ -36,6 +38,8 @@ class SquadPlayer(BaseModel):
     status: str = "a"  # a=available, d=doubtful, i=injured, s=suspended, u=unavailable
     chance_of_playing: int | None = None  # 0-100 or null
     news: str = ""  # Injury/availability news string
+    next_opponent: str | None = None  # e.g. "Arsenal (A)" or "Chelsea (H)"
+    fdr: int | None = None  # Fixture Difficulty Rating 1-5
 
 
 class SquadOptimizationRequest(BaseModel):
@@ -157,22 +161,27 @@ class CaptainRequest(BaseModel):
 
     Attributes:
         player_ids: List of player IDs to consider for captaincy.
-        gameweek: Target gameweek number (1-38).
+        gameweek: Target gameweek number (1-38). If omitted, defaults to next GW.
         differential: If True, prefer low-ownership captains.
     """
 
     player_ids: list[int]
-    gameweek: int = Field(ge=1, le=38)
+    gameweek: int | None = Field(default=None, ge=1, le=38)
     differential: bool = False
 
 
 class CaptainRanking(BaseModel):
-    """Captain ranking entry."""
+    """Captain ranking entry with fixture context."""
 
     player_id: int
     web_name: str = ""
+    position: str = ""
+    team_name: str = ""
     predicted_points: float = 0.0
     effective_ownership: float = 0.0
+    opponent: str = ""
+    fdr: int | None = None
+    reasoning: str = ""
 
 
 class CaptainResponse(BaseModel):
@@ -191,12 +200,23 @@ class BenchOrderRequest(BaseModel):
     Attributes:
         xi_ids: Starting XI player IDs (11 players).
         bench_ids: Bench player IDs (4 players).
-        gameweek: Target gameweek number (1-38).
+        gameweek: Target gameweek number (1-38). If omitted, defaults to next GW.
     """
 
     xi_ids: list[int]
     bench_ids: list[int]
-    gameweek: int = Field(ge=1, le=38)
+    gameweek: int | None = Field(default=None, ge=1, le=38)
+
+
+class BenchPlayerDetail(BaseModel):
+    """Bench player with scoring details."""
+
+    player_id: int
+    web_name: str = ""
+    position: str = ""
+    final_score: float = 0.0
+    opponent: str = ""
+    reasoning: str = ""
 
 
 class BenchOrderResponse(BaseModel):
@@ -204,6 +224,7 @@ class BenchOrderResponse(BaseModel):
 
     bench_order: list[int]
     expected_auto_sub_points: float
+    bench_players: list[BenchPlayerDetail] = []
 
 
 class FormationRequest(BaseModel):

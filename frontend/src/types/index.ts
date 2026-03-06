@@ -154,6 +154,8 @@ export interface SquadPlayer {
   status: PlayerStatus;
   chance_of_playing: number | null;
   news: string;
+  next_opponent: string | null;   // e.g. "Arsenal (A)"
+  fdr: number | null;             // Fixture Difficulty Rating 1-5
 }
 
 // ---------- Optimization ----------
@@ -311,6 +313,9 @@ export interface TransferSuggestion {
   point_gain: number;
   net_cost: number;
   reason: string;
+  is_hit: boolean;
+  hit_cost: number;
+  net_gain_after_hit: number;
 }
 
 /** Request payload for the transfers endpoint. */
@@ -326,6 +331,66 @@ export interface TransferResponse {
   total_point_gain: number;
   total_cost_change: number;
   transfers_used: number;
+  hit_transfers_count: number;
+  total_hit_cost: number;
+  net_gain_after_hits: number;
+}
+
+// ---------- Captain Picker ----------
+
+/** Request payload for the captain picker endpoint. */
+export interface CaptainRequest {
+  player_ids: number[];
+  gameweek?: number;
+  differential?: boolean;
+}
+
+/** A single captain ranking entry. */
+export interface CaptainRanking {
+  player_id: number;
+  web_name: string;
+  position: Position;
+  team_name: string;
+  predicted_points: number;
+  effective_ownership: number;
+  opponent: string;
+  fdr: number | null;
+  reasoning: string;
+}
+
+/** Response from the captain picker endpoint. */
+export interface CaptainResponse {
+  captain_id: number;
+  vice_captain_id: number;
+  captain_xpts: number;
+  vice_captain_xpts: number;
+  rankings: CaptainRanking[];
+}
+
+// ---------- Bench Optimizer ----------
+
+/** Request payload for the bench optimizer endpoint. */
+export interface BenchOrderRequest {
+  xi_ids: number[];
+  bench_ids: number[];
+  gameweek?: number;
+}
+
+/** Bench player detail with scoring breakdown. */
+export interface BenchPlayerDetail {
+  player_id: number;
+  web_name: string;
+  position: Position;
+  final_score: number;
+  opponent: string;
+  reasoning: string;
+}
+
+/** Response from the bench optimizer endpoint. */
+export interface BenchOrderResponse {
+  bench_order: number[];
+  expected_auto_sub_points: number;
+  bench_players: BenchPlayerDetail[];
 }
 
 // ---------- API Responses ----------

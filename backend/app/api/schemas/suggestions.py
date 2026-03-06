@@ -75,6 +75,9 @@ class TransferSuggestion(BaseModel):
     point_gain: float
     net_cost: int  # player_in_price - player_out_price
     reason: str
+    is_hit: bool = False
+    hit_cost: int = 0  # 0 for free transfers, 4 for hits
+    net_gain_after_hit: float = 0.0
 
 
 class TransferRequest(BaseModel):
@@ -95,3 +98,6 @@ class TransferResponse(BaseModel):
     total_point_gain: float
     total_cost_change: int
     transfers_used: int
+    hit_transfers_count: int = 0
+    total_hit_cost: int = 0
+    net_gain_after_hits: float = 0.0

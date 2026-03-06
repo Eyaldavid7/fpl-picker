@@ -23,6 +23,7 @@ from app.api.schemas.suggestions import (
 )
 from app.data.fpl_client import get_fpl_client
 from app.data.models import Player, Position
+from app.prediction.fixture_scorer import FixtureAwareScorer, build_fixture_lookup, get_fixture_scorer
 
 logger = logging.getLogger(__name__)
 
@@ -83,23 +84,21 @@ _FDR_MULTIPLIERS: dict[int, float] = {
 }
 
 # Type alias for the fixture lookup built from next-GW fixtures.
-# Maps team_id -> {"opponent_name": str, "is_home": bool, "fdr": int}
-FixtureLookup = dict[int, dict]
+# Maps team_id -> list of fixture dicts (DGW-aware: 0, 1, or 2 entries).
+FixtureLookup = dict[int, list[dict]]
 
 
 def _predicted_score(player: Player) -> float:
-    """Compute a simple predicted-points heuristic for a player.
+    """Compute a predicted-points heuristic using form regression (0.5/0.5).
 
-    Uses ``form`` (recent average) as the primary signal.  Falls back to
-    ``points_per_game`` (season-long average).  If both are zero, returns
-    a tiny value so comparisons still work.
+    Uses 0.5*form + 0.5*ppg to avoid double-counting recent performance.
+    Falls back to whichever is available. Returns 0.01 if both are zero.
     """
     form = player.form
     ppg = player.points_per_game
 
     if form > 0 and ppg > 0:
-        # Weighted blend: recent form matters more
-        return round(0.65 * form + 0.35 * ppg, 2)
+        return round(0.5 * form + 0.5 * ppg, 2)
     if form > 0:
         return round(form, 2)
     if ppg > 0:
@@ -110,22 +109,30 @@ def _predicted_score(player: Player) -> float:
 def _fixture_adjusted_score(player: Player, fixture_lookup: FixtureLookup) -> float:
     """Return predicted score adjusted by next-fixture difficulty.
 
-    If the player's team has no fixture in the lookup (bye/blank gameweek),
-    the raw predicted score is returned without adjustment.
+    DGW-aware: sums adjusted scores across all fixtures for the team.
+    BGW (no fixtures): returns 0.0.
+    SGW (1 fixture): returns base * FDR multiplier.
     """
     base = _predicted_score(player)
-    fixture_info = fixture_lookup.get(player.team)
-    if fixture_info is None:
-        return base
-    fdr = fixture_info["fdr"]
-    multiplier = _FDR_MULTIPLIERS.get(fdr, 1.0)
-    return round(base * multiplier, 2)
+    fix_list = fixture_lookup.get(player.team, [])
+    if not fix_list:
+        # BGW — no fixture this gameweek
+        return 0.0 if fixture_lookup else base  # empty lookup = data unavailable
+    total = 0.0
+    for fix_info in fix_list:
+        fdr = fix_info["fdr"]
+        multiplier = _FDR_MULTIPLIERS.get(fdr, 1.0)
+        total += base * multiplier
+    return round(total, 2)
 
 
-def _format_opponent(fixture_info: dict) -> str:
-    """Format opponent string like 'Arsenal (H)' or 'Chelsea (A)'."""
-    suffix = "H" if fixture_info["is_home"] else "A"
-    return f"{fixture_info['opponent_name']} ({suffix})"
+def _format_opponent(fix_list: list[dict]) -> str:
+    """Format opponent string like 'Arsenal (H)' or 'Chelsea (H), Wolves (A)' for DGW."""
+    parts = []
+    for fix_info in fix_list:
+        suffix = "H" if fix_info["is_home"] else "A"
+        parts.append(f"{fix_info['opponent_name']} ({suffix})")
+    return ", ".join(parts)
 
 
 def _availability_ok(player: Player) -> bool:
@@ -178,19 +185,20 @@ async def suggest_substitutes(
         next_fixtures = await client.get_typed_fixtures(next_gw)
         teams_map = await client.get_teams_map()
 
+        # DGW-aware: use setdefault().append() instead of direct assignment
         for fix in next_fixtures:
             # Home team entry
-            fixture_lookup[fix.team_h] = {
+            fixture_lookup.setdefault(fix.team_h, []).append({
                 "opponent_name": teams_map.get(fix.team_a, f"Team {fix.team_a}"),
                 "is_home": True,
                 "fdr": fix.team_h_difficulty,
-            }
+            })
             # Away team entry
-            fixture_lookup[fix.team_a] = {
+            fixture_lookup.setdefault(fix.team_a, []).append({
                 "opponent_name": teams_map.get(fix.team_h, f"Team {fix.team_h}"),
                 "is_home": False,
                 "fdr": fix.team_a_difficulty,
-            }
+            })
     except Exception as exc:
         logger.warning(
             "Could not fetch next-GW fixture data; falling back to "
@@ -271,14 +279,14 @@ async def suggest_substitutes(
         if point_gain <= 0:
             continue
 
-        # Resolve fixture info for both players
-        bench_fix = fixture_lookup.get(bench_player.team)
-        starter_fix = fixture_lookup.get(weakest.team)
+        # Resolve fixture info for both players (DGW-aware lists)
+        bench_fix_list = fixture_lookup.get(bench_player.team, [])
+        starter_fix_list = fixture_lookup.get(weakest.team, [])
 
-        bench_next_opponent = _format_opponent(bench_fix) if bench_fix else None
-        bench_fdr = bench_fix["fdr"] if bench_fix else None
-        starter_next_opponent = _format_opponent(starter_fix) if starter_fix else None
-        starter_fdr = starter_fix["fdr"] if starter_fix else None
+        bench_next_opponent = _format_opponent(bench_fix_list) if bench_fix_list else None
+        bench_fdr = bench_fix_list[0]["fdr"] if bench_fix_list else None
+        starter_next_opponent = _format_opponent(starter_fix_list) if starter_fix_list else None
+        starter_fdr = starter_fix_list[0]["fdr"] if starter_fix_list else None
 
         # Build a human-readable reason
         reason_parts: list[str] = []
@@ -337,7 +345,7 @@ async def suggest_substitutes(
     starter_ids = {p.id for p in starters}
     squad_fixtures: list[SquadPlayerFixture] = []
     for p in squad_players:
-        fix = fixture_lookup.get(p.team)
+        fix_list = fixture_lookup.get(p.team, [])
         squad_fixtures.append(
             SquadPlayerFixture(
                 player_id=p.id,
@@ -345,8 +353,8 @@ async def suggest_substitutes(
                 position=p.position.value,
                 is_starter=p.id in starter_ids,
                 predicted_points=_fixture_adjusted_score(p, fixture_lookup),
-                next_opponent=_format_opponent(fix) if fix else None,
-                fdr=fix["fdr"] if fix else None,
+                next_opponent=_format_opponent(fix_list) if fix_list else None,
+                fdr=fix_list[0]["fdr"] if fix_list else None,
             )
         )
     # Sort: starters first (by predicted pts desc), then bench
@@ -471,18 +479,33 @@ async def suggest_transfers(
                 # in the desc-sorted pool).
                 break
 
-    # Sort by gain descending and take top free_transfers
+    # Sort by gain descending
     candidates.sort(key=lambda c: c[2], reverse=True)
-    top = candidates[: request.free_transfers]
 
+    # Take free transfers first, then consider hits for remaining candidates
+    # where the expected gain exceeds the 4-point hit penalty.
+    free_transfers = request.free_transfers
     suggestions: list[TransferSuggestion] = []
     total_gain = 0.0
     total_cost_change = 0
+    hit_count = 0
+    total_hit_cost = 0
 
-    for player_out, player_in, gain in top:
+    for i, (player_out, player_in, gain) in enumerate(candidates):
+        is_hit = i >= free_transfers
+        hit_cost = 4 if is_hit else 0
+        net_gain_after_hit = round(gain - hit_cost, 2)
+
+        # Stop recommending hits when gain doesn't justify the -4 penalty
+        if is_hit and net_gain_after_hit <= 0:
+            break
+
         net_cost = player_in.now_cost - player_out.now_cost
         total_gain += gain
         total_cost_change += net_cost
+        if is_hit:
+            hit_count += 1
+            total_hit_cost += hit_cost
 
         # Build reason
         reason_parts: list[str] = []
@@ -508,6 +531,10 @@ async def suggest_transfers(
             reason_parts.append(
                 f"{player_out.web_name} has availability concerns"
             )
+        if is_hit:
+            reason_parts.append(
+                f"hit transfer (-{hit_cost} pts), net gain: {net_gain_after_hit:.1f} pts"
+            )
 
         team_name = teams_map.get(player_in.team, f"Team {player_in.team}")
 
@@ -527,12 +554,20 @@ async def suggest_transfers(
                 point_gain=gain,
                 net_cost=net_cost,
                 reason="; ".join(reason_parts),
+                is_hit=is_hit,
+                hit_cost=hit_cost,
+                net_gain_after_hit=net_gain_after_hit,
             )
         )
+
+    net_gain_after_hits = round(total_gain - total_hit_cost, 2)
 
     return TransferResponse(
         suggestions=suggestions,
         total_point_gain=round(total_gain, 2),
         total_cost_change=total_cost_change,
         transfers_used=len(suggestions),
+        hit_transfers_count=hit_count,
+        total_hit_cost=total_hit_cost,
+        net_gain_after_hits=net_gain_after_hits,
     )

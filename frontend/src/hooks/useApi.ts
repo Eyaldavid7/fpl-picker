@@ -18,6 +18,10 @@ import type {
   SubstituteResponse,
   TransferRequest,
   TransferResponse,
+  CaptainRequest,
+  CaptainResponse,
+  BenchOrderRequest,
+  BenchOrderResponse,
 } from "@/types";
 
 // ---------- Query Keys ----------
@@ -165,6 +169,26 @@ export function useTransferSuggestions() {
   return useMutation<TransferResponse, Error, TransferRequest>({
     mutationFn: async (params) => {
       const res = await api.getTransferSuggestions(params);
+      return res.data;
+    },
+  });
+}
+
+/** Select captain and vice-captain using fixture-aware scoring. */
+export function useCaptainPicker() {
+  return useMutation<CaptainResponse, Error, CaptainRequest>({
+    mutationFn: async (params) => {
+      const res = await api.selectCaptain(params);
+      return res.data;
+    },
+  });
+}
+
+/** Optimize bench order using fixture-aware scoring. */
+export function useBenchOptimizer() {
+  return useMutation<BenchOrderResponse, Error, BenchOrderRequest>({
+    mutationFn: async (params) => {
+      const res = await api.optimizeBench(params);
       return res.data;
     },
   });

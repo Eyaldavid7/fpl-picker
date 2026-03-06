@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException
 from app.api.schemas.optimization import (
     BenchOrderRequest,
     BenchOrderResponse,
+    BenchPlayerDetail,
+    CaptainRanking,
     CaptainRequest,
     CaptainResponse,
     FormationRequest,
@@ -23,6 +25,11 @@ from app.api.schemas.optimization import (
 )
 from app.optimization.engine import OptimizationEngine
 from app.optimization.models import OptimizationResult
+from app.prediction.fixture_scorer import (
+    FixtureAwareScorer,
+    build_fixture_lookup,
+    get_fixture_scorer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,10 +174,17 @@ async def optimize_squad(
             }
             players.append(player)
 
-            # Use 'form' as predicted points; fall back to points_per_game
+            # Base prediction: 0.5*form + 0.5*ppg (form regression)
             form = float(el.get("form") or 0)
             ppg = float(el.get("points_per_game") or 0)
-            pred = form if form > 0 else ppg
+            if form > 0 and ppg > 0:
+                pred = round(0.5 * form + 0.5 * ppg, 2)
+            elif form > 0:
+                pred = round(form, 2)
+            elif ppg > 0:
+                pred = round(ppg, 2)
+            else:
+                pred = 0.01
 
             # Discount prediction for doubtful players (75% chance = 75% of pts)
             if chance is not None and chance < 100:
@@ -213,7 +227,52 @@ async def optimize_squad(
             detail="Optimisation produced no result. The budget or constraints may be too restrictive to form a valid squad.",
         )
 
-    return _result_to_response(result, predictions)
+    response = _result_to_response(result, predictions)
+
+    # --- Enrich squad players with next-GW fixture info (post-processing) ---
+    try:
+        from app.data.fpl_client import get_fpl_client
+
+        client = get_fpl_client()
+        current_gw = await client.get_current_gameweek()
+        next_gw = min(current_gw + 1, 38)
+        next_fixtures = await client.get_typed_fixtures(next_gw)
+        teams_map = await client.get_teams_map()
+
+        # Build DGW-aware fixture lookup: team_id -> list of fixture dicts
+        fixture_lookup: dict[int, list[dict]] = {}
+        for fix in next_fixtures:
+            # Home team entry
+            fixture_lookup.setdefault(fix.team_h, []).append({
+                "opponent_name": teams_map.get(fix.team_a, f"Team {fix.team_a}"),
+                "is_home": True,
+                "fdr": fix.team_h_difficulty,
+            })
+            # Away team entry
+            fixture_lookup.setdefault(fix.team_a, []).append({
+                "opponent_name": teams_map.get(fix.team_h, f"Team {fix.team_h}"),
+                "is_home": False,
+                "fdr": fix.team_a_difficulty,
+            })
+
+        # Enrich each squad player with fixture data
+        for player in response.squad:
+            fix_list = fixture_lookup.get(player.team_id, [])
+            if fix_list:
+                parts = []
+                for fix_info in fix_list:
+                    venue = "(H)" if fix_info["is_home"] else "(A)"
+                    parts.append(f"{fix_info['opponent_name']} {venue}")
+                player.next_opponent = ", ".join(parts)
+                player.fdr = fix_list[0]["fdr"]  # Use first fixture's FDR
+    except Exception as exc:
+        logger.warning(
+            "Could not enrich squad with fixture data; returning without "
+            "opponent info: %s",
+            exc,
+        )
+
+    return response
 
 
 @router.get("/formations")
@@ -246,24 +305,180 @@ async def compare_methods(request: CompareRequest) -> CompareResponse:
 
 @router.post("/captain", response_model=CaptainResponse)
 async def select_captain(request: CaptainRequest) -> CaptainResponse:
-    """Select optimal captain and vice-captain from given XI."""
-    # TODO: Implement with CaptainSelector
+    """Select optimal captain and vice-captain from given XI.
+
+    Uses fixture-aware scoring to rank candidates. If ``differential``
+    is True, applies an ownership penalty to favor low-ownership picks.
+    """
+    scorer = get_fixture_scorer()
+
+    # Resolve gameweek (default to next unfinished GW)
+    if request.gameweek is None:
+        from app.data.fpl_client import get_fpl_client
+        client = get_fpl_client()
+        gw = await client.get_current_gameweek()
+        gameweek = min(gw + 1, 38)
+    else:
+        gameweek = request.gameweek
+
+    try:
+        scores = await scorer.score_squad(request.player_ids, gameweek)
+    except Exception as exc:
+        logger.error("Failed to score squad for captain: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Scoring failed: {exc}")
+
+    if not scores:
+        raise HTTPException(status_code=404, detail="No players found for given IDs")
+
+    # Fetch teams map for display names
+    from app.data.fpl_client import get_fpl_client
+    client = get_fpl_client()
+    teams_name_map = await client.get_teams_map()
+
+    # Build rankings
+    rankings: list[CaptainRanking] = []
+    for pid, sp in scores.items():
+        effective_score = sp.final_score
+        # Differential mode: penalize high ownership
+        if request.differential:
+            # Fetch player ownership
+            all_players = await client.get_players()
+            player_map = {p.id: p for p in all_players}
+            player = player_map.get(pid)
+            ownership = player.selected_by_percent if player else 0.0
+            effective_score = sp.final_score * (1 - ownership / 200)
+        else:
+            ownership = 0.0
+
+        # Build opponent string from first fixture
+        opponent_str = ""
+        fdr_val = None
+        if sp.fixtures:
+            parts = []
+            for f in sp.fixtures:
+                venue = "H" if f.is_home else "A"
+                parts.append(f"{f.opponent_name} ({venue})")
+                if fdr_val is None:
+                    fdr_val = f.fdr
+            opponent_str = ", ".join(parts)
+
+        team_name = teams_name_map.get(sp.team_id, "")
+        reasoning = "; ".join(sp.reasoning) if sp.reasoning else ""
+
+        rankings.append(CaptainRanking(
+            player_id=pid,
+            web_name=sp.web_name,
+            position=sp.position,
+            team_name=team_name,
+            predicted_points=round(effective_score, 2),
+            effective_ownership=round(ownership, 1),
+            opponent=opponent_str,
+            fdr=fdr_val,
+            reasoning=reasoning,
+        ))
+
+    # Sort by predicted points descending
+    rankings.sort(key=lambda r: r.predicted_points, reverse=True)
+
+    captain = rankings[0] if rankings else None
+    vice = rankings[1] if len(rankings) > 1 else None
+
     return CaptainResponse(
-        captain_id=0,
-        vice_captain_id=0,
-        captain_xpts=0.0,
-        vice_captain_xpts=0.0,
-        rankings=[],
+        captain_id=captain.player_id if captain else 0,
+        vice_captain_id=vice.player_id if vice else 0,
+        captain_xpts=captain.predicted_points if captain else 0.0,
+        vice_captain_xpts=vice.predicted_points if vice else 0.0,
+        rankings=rankings,
     )
 
 
 @router.post("/bench", response_model=BenchOrderResponse)
 async def optimize_bench(request: BenchOrderRequest) -> BenchOrderResponse:
-    """Optimize bench order given starting XI and substitutes."""
-    # TODO: Implement with BenchOptimizer
+    """Optimize bench order given starting XI and substitutes.
+
+    Scores bench players using fixture-aware predictions and orders them
+    by expected auto-sub value. GKP is always placed first (FPL rule:
+    bench slot 0 is the backup keeper).
+    """
+    scorer = get_fixture_scorer()
+
+    # Resolve gameweek
+    if request.gameweek is None:
+        from app.data.fpl_client import get_fpl_client
+        client = get_fpl_client()
+        gw = await client.get_current_gameweek()
+        gameweek = min(gw + 1, 38)
+    else:
+        gameweek = request.gameweek
+
+    # Score all bench players
+    try:
+        scores = await scorer.score_squad(request.bench_ids, gameweek)
+    except Exception as exc:
+        logger.error("Failed to score bench players: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Scoring failed: {exc}")
+
+    # Fetch teams map for opponent display
+    from app.data.fpl_client import get_fpl_client
+    client = get_fpl_client()
+    teams_name_map = await client.get_teams_map()
+
+    # Separate GKP from outfield bench players
+    gkp_ids: list[int] = []
+    outfield: list[tuple[int, float]] = []
+
+    for pid in request.bench_ids:
+        sp = scores.get(pid)
+        if sp is None:
+            continue
+        if sp.position == "GKP":
+            gkp_ids.append(pid)
+        else:
+            outfield.append((pid, sp.final_score))
+
+    # Sort outfield by score descending (highest auto-sub value first)
+    outfield.sort(key=lambda x: x[1], reverse=True)
+
+    # FPL bench order: GKP first, then outfield by score
+    bench_order = gkp_ids + [pid for pid, _ in outfield]
+
+    # Calculate expected auto-sub points (sum of all bench scores,
+    # weighted by likelihood of being subbed on — approximate as
+    # 15% for first sub, 5% for second, 2% for third)
+    sub_weights = [0.15, 0.05, 0.02]
+    expected_auto_sub = 0.0
+    outfield_scores = [s for _, s in outfield]
+    for i, score in enumerate(outfield_scores):
+        weight = sub_weights[i] if i < len(sub_weights) else 0.01
+        expected_auto_sub += score * weight
+
+    # Build bench player details
+    bench_players: list[BenchPlayerDetail] = []
+    for pid in bench_order:
+        sp = scores.get(pid)
+        if sp is None:
+            continue
+        opponent_str = ""
+        if sp.fixtures:
+            parts = []
+            for f in sp.fixtures:
+                venue = "H" if f.is_home else "A"
+                parts.append(f"{f.opponent_name} ({venue})")
+            opponent_str = ", ".join(parts)
+
+        bench_players.append(BenchPlayerDetail(
+            player_id=pid,
+            web_name=sp.web_name,
+            position=sp.position,
+            final_score=round(sp.final_score, 2),
+            opponent=opponent_str,
+            reasoning="; ".join(sp.reasoning) if sp.reasoning else "",
+        ))
+
     return BenchOrderResponse(
-        bench_order=request.bench_ids,
-        expected_auto_sub_points=0.0,
+        bench_order=bench_order,
+        expected_auto_sub_points=round(expected_auto_sub, 2),
+        bench_players=bench_players,
     )
 
 
