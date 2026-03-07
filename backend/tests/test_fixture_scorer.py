@@ -38,6 +38,8 @@ def _make_player(**overrides) -> Player:
         "expected_goals": 7.0,  # 0.39 per 90 (above FWD baseline 0.35)
         "expected_assists": 2.4,  # 0.13 per 90 (above FWD baseline 0.12)
         "expected_goals_conceded": 0.0,
+        "threat": 700.0,  # 35.0 per 90 = FWD baseline
+        "creativity": 400.0,  # 20.0 per 90 = FWD baseline
         "selected_by_percent": 15.0,
         "chance_of_playing_next_round": 100,
         "now_cost": 80,
@@ -61,8 +63,11 @@ def _make_defender(**overrides) -> Player:
         "expected_assists": 2.0,
         "expected_goals_conceded": 36.0,  # 1.2 per 90 = baseline
         "clean_sheets": 10,  # ~0.33 per 90 = baseline
+        "threat": 100.0,
+        "creativity": 100.0,
         "now_cost": 55,
         "status": "a",
+        "chance_of_playing_next_round": 100,
     }
     defaults.update(overrides)
     return Player(**defaults)
@@ -82,8 +87,11 @@ def _make_gkp(**overrides) -> Player:
         "expected_assists": 0.5,
         "expected_goals_conceded": 36.0,
         "clean_sheets": 10,
+        "threat": 0.0,
+        "creativity": 30.0,
         "now_cost": 50,
         "status": "a",
+        "chance_of_playing_next_round": 100,
     }
     defaults.update(overrides)
     return Player(**defaults)
@@ -499,3 +507,108 @@ class TestDefenderMultiplierBounds:
         result = scorer.score_player(gkp, fixture, teams)
         mult = result.fixtures[0].fixture_multiplier
         assert MULTIPLIER_MIN_DEF <= mult <= MULTIPLIER_MAX_DEF
+
+
+class TestMinutesFactor:
+    """Test minutes/availability probability factor."""
+
+    def test_unavailable_player_scores_zero(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        fixture = _make_fixture_lookup(1, 5, is_home=True, fdr=3)
+
+        injured = _make_player(status="i")
+        result = scorer.score_player(injured, fixture, teams)
+        assert result.final_score == 0.0
+
+    def test_doubtful_low_chance_penalized(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        fixture = _make_fixture_lookup(1, 5, is_home=True, fdr=3)
+
+        # 50% chance, low minutes = penalized
+        doubtful = _make_player(chance_of_playing_next_round=50, minutes=900)
+        full = _make_player(chance_of_playing_next_round=100, minutes=2700)
+
+        doubtful_score = scorer.score_player(doubtful, fixture, teams)
+        full_score = scorer.score_player(full, fixture, teams)
+
+        assert doubtful_score.final_score < full_score.final_score
+
+    def test_very_low_chance_filtered_out(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        fixture = _make_fixture_lookup(1, 5, is_home=True, fdr=3)
+
+        # 0% chance = filtered out
+        zero_chance = _make_player(chance_of_playing_next_round=0)
+        result = scorer.score_player(zero_chance, fixture, teams)
+        assert result.final_score == 0.0
+
+    def test_nailed_player_no_penalty(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        fixture = _make_fixture_lookup(1, 5, is_home=True, fdr=3)
+
+        # 100% chance, high minutes = no penalty
+        nailed = _make_player(chance_of_playing_next_round=100, minutes=2700)
+        result = scorer.score_player(nailed, fixture, teams)
+        assert "nailedness" not in " ".join(result.reasoning).lower()
+
+
+class TestICTFactors:
+    """Test ICT threat/creativity integration for attackers."""
+
+    def test_high_threat_fwd_scores_higher(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        fixture = _make_fixture_lookup(1, 5, is_home=True, fdr=3)
+
+        # High threat FWD
+        high_threat = _make_player(id=1, threat=1400.0, creativity=400.0)
+        # Low threat FWD
+        low_threat = _make_player(id=2, threat=200.0, creativity=400.0)
+
+        high_result = scorer.score_player(high_threat, fixture, teams)
+        low_result = scorer.score_player(low_threat, fixture, teams)
+
+        assert high_result.final_score > low_result.final_score
+
+    def test_high_creativity_mid_scores_higher(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        fixture = _make_fixture_lookup(1, 5, is_home=True, fdr=3)
+
+        # High creativity MID
+        creative = _make_player(id=1, element_type=3, threat=400.0, creativity=1200.0)
+        # Low creativity MID
+        uncreative = _make_player(id=2, element_type=3, threat=400.0, creativity=100.0)
+
+        creative_result = scorer.score_player(creative, fixture, teams)
+        uncreative_result = scorer.score_player(uncreative, fixture, teams)
+
+        assert creative_result.final_score > uncreative_result.final_score
+
+
+class TestCSProbabilityIndependent:
+    """Test that CS factor is independently computed, not double-counted."""
+
+    def test_cs_factor_vs_weak_attack_boosts_defender(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        # Very weak attack
+        teams[5] = _make_team(5, "Weak", strength_attack_home=800, strength_attack_away=800)
+        # Very strong attack
+        teams[6] = _make_team(6, "Strong", strength_attack_home=1500, strength_attack_away=1500)
+
+        defender = _make_defender(team=2)
+
+        weak_fix = _make_fixture_lookup(2, 5, is_home=True, fdr=3)
+        strong_fix = _make_fixture_lookup(2, 6, is_home=True, fdr=3)
+
+        vs_weak = scorer.score_player(defender, weak_fix, teams)
+        vs_strong = scorer.score_player(defender, strong_fix, teams)
+
+        # With same FDR, the CS probability factor should still differentiate
+        ratio = vs_weak.final_score / vs_strong.final_score
+        assert ratio > 1.05, f"Expected > 5% CS boost vs weak attack, got {ratio:.3f}x"

@@ -88,13 +88,13 @@ MULTIPLIER_MAX = 1.35
 MULTIPLIER_MIN_DEF = 0.70
 MULTIPLIER_MAX_DEF = 1.45
 
-# Opponent strength factor clamp — attack positions
-OPP_STRENGTH_MIN = 0.90
-OPP_STRENGTH_MAX = 1.10
+# Opponent strength factor clamp — attack positions (wider than before)
+OPP_STRENGTH_MIN = 0.80
+OPP_STRENGTH_MAX = 1.20
 
-# Opponent strength factor clamp — defensive positions (wider)
-OPP_STRENGTH_MIN_DEF = 0.82
-OPP_STRENGTH_MAX_DEF = 1.18
+# Opponent strength factor clamp — defensive positions (much wider)
+OPP_STRENGTH_MIN_DEF = 0.70
+OPP_STRENGTH_MAX_DEF = 1.30
 
 # Positional factor clamp
 POSITIONAL_MIN = 0.90
@@ -103,10 +103,13 @@ POSITIONAL_MAX = 1.15
 # Clean sheet baseline: ~33% of matches result in CS for average DEF
 CS_BASELINE = 0.33
 
+# Base CS probability (~30% for average PL match)
+CS_PROB_BASE = 0.30
+
 # Approximate PL per-90 baselines
 POSITIONAL_BASELINES: dict[str, dict[str, float]] = {
-    "FWD": {"xg_baseline": 0.35, "xa_baseline": 0.12},
-    "MID": {"xg_baseline": 0.15, "xa_baseline": 0.15},
+    "FWD": {"xg_baseline": 0.35, "xa_baseline": 0.12, "threat_baseline": 35.0, "creativity_baseline": 20.0},
+    "MID": {"xg_baseline": 0.15, "xa_baseline": 0.15, "threat_baseline": 20.0, "creativity_baseline": 30.0},
     "DEF": {"xgc_baseline": 1.20},
     "GKP": {"xgc_baseline": 1.20},
 }
@@ -178,9 +181,10 @@ class FixtureAwareScorer:
         return max(OPP_STRENGTH_MIN, min(OPP_STRENGTH_MAX, raw))
 
     def _compute_positional_factor(self, player: Player) -> float:
-        """Compute positional xG/xA factor using per-90 rates.
+        """Compute positional factor using per-90 rates.
 
-        Compares the player's per-90 output against positional baselines.
+        FWD/MID: blends xG, xA, threat, and creativity vs baselines.
+        DEF/GKP: blends xGC ratio with clean sheet rate.
         Returns a multiplicative factor clamped to [0.90, 1.15].
         """
         minutes = max(player.minutes, 90)  # floor to avoid div-by-zero
@@ -194,17 +198,20 @@ class FixtureAwareScorer:
         if player.position in (Position.FWD, Position.MID):
             xg_per_90 = player.expected_goals / appearances
             xa_per_90 = player.expected_assists / appearances
+            threat_per_90 = player.threat / appearances
+            creativity_per_90 = player.creativity / appearances
 
-            xg_baseline = baselines["xg_baseline"]
-            xa_baseline = baselines["xa_baseline"]
-
-            xg_ratio = xg_per_90 / xg_baseline if xg_baseline > 0 else 1.0
-            xa_ratio = xa_per_90 / xa_baseline if xa_baseline > 0 else 1.0
+            xg_ratio = xg_per_90 / baselines["xg_baseline"] if baselines["xg_baseline"] > 0 else 1.0
+            xa_ratio = xa_per_90 / baselines["xa_baseline"] if baselines["xa_baseline"] > 0 else 1.0
+            threat_ratio = threat_per_90 / baselines["threat_baseline"] if baselines["threat_baseline"] > 0 else 1.0
+            creativity_ratio = creativity_per_90 / baselines["creativity_baseline"] if baselines["creativity_baseline"] > 0 else 1.0
 
             if player.position == Position.FWD:
-                blended = 0.6 * xg_ratio + 0.4 * xa_ratio
+                # FWD: xG-heavy + threat
+                blended = 0.40 * xg_ratio + 0.25 * xa_ratio + 0.20 * threat_ratio + 0.15 * creativity_ratio
             else:
-                blended = 0.5 * xg_ratio + 0.5 * xa_ratio
+                # MID: balanced + creativity
+                blended = 0.30 * xg_ratio + 0.25 * xa_ratio + 0.15 * threat_ratio + 0.30 * creativity_ratio
 
             return max(POSITIONAL_MIN, min(POSITIONAL_MAX, blended))
 
@@ -221,6 +228,63 @@ class FixtureAwareScorer:
             blended = 0.6 * xgc_ratio + 0.4 * cs_ratio
 
             return max(POSITIONAL_MIN, min(POSITIONAL_MAX, blended))
+
+    def _compute_cs_probability_factor(
+        self,
+        opponent: Team,
+        is_home: bool,
+        league_avgs: dict[str, float],
+    ) -> float:
+        """Compute clean sheet probability factor independently for DEF/GKP.
+
+        Models CS probability from opponent's attacking strength relative to
+        league average. Returns a multiplicative factor clamped to [0.85, 1.20].
+        """
+        if is_home:
+            opp_attack = opponent.strength_attack_away
+            avg = league_avgs["attack_away"]
+        else:
+            opp_attack = opponent.strength_attack_home
+            avg = league_avgs["attack_home"]
+
+        # ratio < 1 means weak opponent attack → higher CS prob → bonus
+        ratio = opp_attack / avg if avg > 0 else 1.0
+        # CS probability adjusted by opponent quality
+        cs_prob = CS_PROB_BASE / ratio if ratio > 0 else CS_PROB_BASE
+        cs_prob = min(0.55, max(0.10, cs_prob))
+
+        # Convert to multiplier: baseline CS prob (0.30) → factor 1.0
+        factor = cs_prob / CS_PROB_BASE
+        return max(0.85, min(1.20, factor))
+
+    def _compute_minutes_factor(self, player: Player) -> float:
+        """Compute minutes/availability probability factor.
+
+        Uses chance_of_playing_next_round and minutes history as a
+        nailedness proxy. Returns a factor in [0.0, 1.0].
+        """
+        # Availability probability
+        chance = player.chance_of_playing_next_round
+        if chance is None:
+            availability = 1.0  # None means fully available
+        else:
+            availability = chance / 100.0
+
+        # Hard filter: unavailable/injured/suspended
+        if player.status in ("i", "s", "u"):
+            return 0.0
+        if availability < 0.25:
+            return 0.0
+
+        # Nailedness: minutes played vs max possible (estimate ~30 GWs played so far)
+        # Players averaging 90 min/game → 1.0, rotation risks → lower
+        max_possible = 2700  # ~30 GWs * 90 min
+        nailedness = min(1.0, player.minutes / max_possible) if max_possible > 0 else 1.0
+
+        # Blend: 60% availability, 40% nailedness
+        # But don't penalize too harshly — clamp to [0.70, 1.0]
+        raw = 0.6 * availability + 0.4 * nailedness
+        return max(0.70, min(1.0, raw))
 
     def _precompute_league_avgs(self, teams: dict[int, Team]) -> dict[str, float]:
         """Pre-compute league average strength metrics (hoisted out of loop)."""
@@ -282,11 +346,12 @@ class FixtureAwareScorer:
             else:
                 opp_factor = 1.0
 
-            # Clean sheet probability factor (DEF/GKP only)
+            # Clean sheet probability factor (DEF/GKP only — independent signal)
             cs_factor = 1.0
             if is_defensive and opponent_team:
-                # Reuse opp_factor as CS proxy: weak attack → bonus, strong → penalty
-                cs_factor = max(0.90, min(1.15, opp_factor))
+                cs_factor = self._compute_cs_probability_factor(
+                    opponent_team, is_home, league_avgs
+                )
 
             # Combined fixture multiplier (clamped)
             raw_multiplier = fdr_factor * ha_factor * opp_factor * cs_factor
@@ -327,6 +392,15 @@ class FixtureAwareScorer:
             # DGW: sum scores (player plays twice)
             final_score = round(sum(fd.fixture_score for fd in fixture_details), 2)
             reasoning_parts.insert(0, f"Double gameweek ({len(fixture_details)} fixtures)")
+
+        # Apply minutes/availability discount
+        minutes_factor = self._compute_minutes_factor(player)
+        if minutes_factor < 1.0:
+            final_score = round(final_score * minutes_factor, 2)
+            if minutes_factor == 0.0:
+                reasoning_parts.append("Unavailable")
+            else:
+                reasoning_parts.append(f"Minutes risk ({minutes_factor:.0%} nailedness)")
 
         return ScoredPlayer(
             player_id=player.id,

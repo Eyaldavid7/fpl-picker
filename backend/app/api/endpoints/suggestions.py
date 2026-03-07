@@ -22,7 +22,7 @@ from app.api.schemas.suggestions import (
     TransferSuggestion,
 )
 from app.data.fpl_client import get_fpl_client
-from app.data.models import Player, Position
+from app.data.models import Player, Position, Team
 from app.prediction.fixture_scorer import FixtureAwareScorer, build_fixture_lookup, get_fixture_scorer
 
 logger = logging.getLogger(__name__)
@@ -74,56 +74,26 @@ def _parse_formation(formation: str) -> dict[Position, int]:
 # Scoring helpers
 # ---------------------------------------------------------------------------
 
-# FDR multipliers: lower difficulty = boost, higher = penalty
-_FDR_MULTIPLIERS: dict[int, float] = {
-    1: 1.15,
-    2: 1.08,
-    3: 1.0,
-    4: 0.92,
-    5: 0.85,
-}
-
 # Type alias for the fixture lookup built from next-GW fixtures.
 # Maps team_id -> list of fixture dicts (DGW-aware: 0, 1, or 2 entries).
 FixtureLookup = dict[int, list[dict]]
 
 
-def _predicted_score(player: Player) -> float:
-    """Compute a predicted-points heuristic using form regression (0.5/0.5).
+def _scorer_adjusted_score(
+    player: Player,
+    fixture_lookup: FixtureLookup,
+    teams: dict[int, "Team"],
+    league_avgs: dict[str, float] | None = None,
+) -> float:
+    """Score a player using the central FixtureAwareScorer.
 
-    Uses 0.5*form + 0.5*ppg to avoid double-counting recent performance.
-    Falls back to whichever is available. Returns 0.01 if both are zero.
+    Replaces the old _predicted_score() + _fixture_adjusted_score() with the
+    full fixture-aware pipeline (opponent strength, positional factors, ICT,
+    minutes probability, CS factor).
     """
-    form = player.form
-    ppg = player.points_per_game
-
-    if form > 0 and ppg > 0:
-        return round(0.5 * form + 0.5 * ppg, 2)
-    if form > 0:
-        return round(form, 2)
-    if ppg > 0:
-        return round(ppg, 2)
-    return 0.01
-
-
-def _fixture_adjusted_score(player: Player, fixture_lookup: FixtureLookup) -> float:
-    """Return predicted score adjusted by next-fixture difficulty.
-
-    DGW-aware: sums adjusted scores across all fixtures for the team.
-    BGW (no fixtures): returns 0.0.
-    SGW (1 fixture): returns base * FDR multiplier.
-    """
-    base = _predicted_score(player)
-    fix_list = fixture_lookup.get(player.team, [])
-    if not fix_list:
-        # BGW — no fixture this gameweek
-        return 0.0 if fixture_lookup else base  # empty lookup = data unavailable
-    total = 0.0
-    for fix_info in fix_list:
-        fdr = fix_info["fdr"]
-        multiplier = _FDR_MULTIPLIERS.get(fdr, 1.0)
-        total += base * multiplier
-    return round(total, 2)
+    scorer = get_fixture_scorer()
+    result = scorer.score_player(player, fixture_lookup, teams, league_avgs=league_avgs)
+    return result.final_score
 
 
 def _format_opponent(fix_list: list[dict]) -> str:
@@ -168,12 +138,16 @@ async def suggest_substitutes(
 
     try:
         all_players = await client.get_players()
+        all_teams = await client.get_teams()
     except Exception as exc:
         logger.error("Failed to fetch FPL data: %s", exc)
         raise HTTPException(
             status_code=502,
             detail=f"Could not fetch live FPL data: {exc}",
         )
+
+    # Build team lookup for the central scorer
+    teams_by_id: dict[int, Team] = {t.id: t for t in all_teams}
 
     # ------------------------------------------------------------------
     # Fetch next-GW fixture data for difficulty adjustments
@@ -185,28 +159,17 @@ async def suggest_substitutes(
         next_fixtures = await client.get_typed_fixtures(next_gw)
         teams_map = await client.get_teams_map()
 
-        # DGW-aware: use setdefault().append() instead of direct assignment
-        for fix in next_fixtures:
-            # Home team entry
-            fixture_lookup.setdefault(fix.team_h, []).append({
-                "opponent_name": teams_map.get(fix.team_a, f"Team {fix.team_a}"),
-                "is_home": True,
-                "fdr": fix.team_h_difficulty,
-            })
-            # Away team entry
-            fixture_lookup.setdefault(fix.team_a, []).append({
-                "opponent_name": teams_map.get(fix.team_h, f"Team {fix.team_h}"),
-                "is_home": False,
-                "fdr": fix.team_a_difficulty,
-            })
+        fixture_lookup = build_fixture_lookup(next_fixtures, teams_map)
     except Exception as exc:
         logger.warning(
             "Could not fetch next-GW fixture data; falling back to "
             "unadjusted scores: %s",
             exc,
         )
-        # fixture_lookup stays empty -- _fixture_adjusted_score will
-        # return unadjusted predictions for all players.
+
+    # Pre-compute league averages for scorer
+    scorer = get_fixture_scorer()
+    league_avgs = scorer._precompute_league_avgs(teams_by_id)
 
     # Build lookup of squad players
     player_map: dict[int, Player] = {p.id: p for p in all_players}
@@ -245,7 +208,7 @@ async def suggest_substitutes(
     for pos in (Position.GKP, Position.DEF, Position.MID, Position.FWD):
         group = by_position.get(pos, [])
         group.sort(
-            key=lambda p: _fixture_adjusted_score(p, fixture_lookup),
+            key=lambda p: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs),
             reverse=True,
         )
         n_start = position_slots.get(pos, 0)
@@ -254,10 +217,10 @@ async def suggest_substitutes(
 
     # Compute fixture-adjusted predicted scores
     starter_scores = {
-        p.id: _fixture_adjusted_score(p, fixture_lookup) for p in starters
+        p.id: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs) for p in starters
     }
     bench_scores = {
-        p.id: _fixture_adjusted_score(p, fixture_lookup) for p in bench
+        p.id: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs) for p in bench
     }
 
     # For each bench player, see if they outscore any starter in the same
@@ -352,7 +315,7 @@ async def suggest_substitutes(
                 web_name=p.web_name,
                 position=p.position.value,
                 is_starter=p.id in starter_ids,
-                predicted_points=_fixture_adjusted_score(p, fixture_lookup),
+                predicted_points=_scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs),
                 next_opponent=_format_opponent(fix_list) if fix_list else None,
                 fdr=fix_list[0]["fdr"] if fix_list else None,
             )
@@ -388,6 +351,7 @@ async def suggest_transfers(
 
     try:
         all_players = await client.get_players()
+        all_teams = await client.get_teams()
         teams_map = await client.get_teams_map()
     except Exception as exc:
         logger.error("Failed to fetch FPL data: %s", exc)
@@ -395,6 +359,24 @@ async def suggest_transfers(
             status_code=502,
             detail=f"Could not fetch live FPL data: {exc}",
         )
+
+    teams_by_id: dict[int, Team] = {t.id: t for t in all_teams}
+
+    # Build fixture lookup for scoring
+    transfer_fixture_lookup: FixtureLookup = {}
+    try:
+        current_gw = await client.get_current_gameweek()
+        next_gw = current_gw + 1
+        next_fixtures = await client.get_typed_fixtures(next_gw)
+        transfer_fixture_lookup = build_fixture_lookup(next_fixtures, teams_map)
+    except Exception as exc:
+        logger.warning("Could not fetch fixture data for transfers: %s", exc)
+
+    transfer_scorer = get_fixture_scorer()
+    transfer_league_avgs = transfer_scorer._precompute_league_avgs(teams_by_id)
+
+    def _score(p: Player) -> float:
+        return _scorer_adjusted_score(p, transfer_fixture_lookup, teams_by_id, transfer_league_avgs)
 
     # Build lookups
     player_map: dict[int, Player] = {p.id: p for p in all_players}
@@ -444,18 +426,18 @@ async def suggest_transfers(
             continue
 
         # Sort ascending by predicted score so weakest is first
-        pos_squad_sorted = sorted(pos_squad, key=_predicted_score)
+        pos_squad_sorted = sorted(pos_squad, key=_score)
 
         # Pool players in this position, sorted descending by predicted
         pos_pool = [p for p in available_pool if p.position == pos]
-        pos_pool.sort(key=_predicted_score, reverse=True)
+        pos_pool.sort(key=_score, reverse=True)
 
         # For each weak squad player, find the best affordable upgrade
         for squad_player in pos_squad_sorted:
-            squad_pred = _predicted_score(squad_player)
+            squad_pred = _score(squad_player)
 
             for candidate in pos_pool:
-                cand_pred = _predicted_score(candidate)
+                cand_pred = _score(candidate)
                 if cand_pred <= squad_pred:
                     # Pool is sorted desc; no further candidates will beat this
                     break
@@ -465,25 +447,20 @@ async def suggest_transfers(
                     continue
 
                 # Enforce max 3 players per team
-                # After removing squad_player and adding candidate, check limit
                 incoming_team = candidate.team
                 current_count = team_counts.get(incoming_team, 0)
-                # If squad_player is from the same team, removing them frees a slot
                 adjustment = -1 if squad_player.team == incoming_team else 0
                 if current_count + adjustment >= 3:
                     continue
 
                 gain = round(cand_pred - squad_pred, 2)
                 candidates.append((squad_player, candidate, gain))
-                # Only keep the best candidate per squad player (first hit
-                # in the desc-sorted pool).
                 break
 
     # Sort by gain descending
     candidates.sort(key=lambda c: c[2], reverse=True)
 
     # Take free transfers first, then consider hits for remaining candidates
-    # where the expected gain exceeds the 4-point hit penalty.
     free_transfers = request.free_transfers
     suggestions: list[TransferSuggestion] = []
     total_gain = 0.0
@@ -496,7 +473,6 @@ async def suggest_transfers(
         hit_cost = 4 if is_hit else 0
         net_gain_after_hit = round(gain - hit_cost, 2)
 
-        # Stop recommending hits when gain doesn't justify the -4 penalty
         if is_hit and net_gain_after_hit <= 0:
             break
 
@@ -509,8 +485,8 @@ async def suggest_transfers(
 
         # Build reason
         reason_parts: list[str] = []
-        in_pred = _predicted_score(player_in)
-        out_pred = _predicted_score(player_out)
+        in_pred = _score(player_in)
+        out_pred = _score(player_out)
         reason_parts.append(
             f"{player_in.web_name} predicted {in_pred:.1f} pts "
             f"vs {player_out.web_name}'s {out_pred:.1f} pts"
