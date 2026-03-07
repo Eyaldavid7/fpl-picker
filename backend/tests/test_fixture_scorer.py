@@ -8,10 +8,16 @@ from app.prediction.fixture_scorer import (
     FixtureLookup,
     build_fixture_lookup,
     FDR_FACTORS,
+    FDR_FACTORS_ATTACK,
+    FDR_FACTORS_DEFENCE,
     MULTIPLIER_MIN,
     MULTIPLIER_MAX,
+    MULTIPLIER_MIN_DEF,
+    MULTIPLIER_MAX_DEF,
     OPP_STRENGTH_MIN,
     OPP_STRENGTH_MAX,
+    OPP_STRENGTH_MIN_DEF,
+    OPP_STRENGTH_MAX_DEF,
 )
 
 
@@ -54,7 +60,29 @@ def _make_defender(**overrides) -> Player:
         "expected_goals": 1.5,
         "expected_assists": 2.0,
         "expected_goals_conceded": 36.0,  # 1.2 per 90 = baseline
+        "clean_sheets": 10,  # ~0.33 per 90 = baseline
         "now_cost": 55,
+        "status": "a",
+    }
+    defaults.update(overrides)
+    return Player(**defaults)
+
+
+def _make_gkp(**overrides) -> Player:
+    """Create a GKP player."""
+    defaults = {
+        "id": 20,
+        "web_name": "TestGK",
+        "team": 2,
+        "element_type": 1,  # GKP
+        "form": 4.0,
+        "points_per_game": 3.5,
+        "minutes": 2700,  # 30 appearances
+        "expected_goals": 0.0,
+        "expected_assists": 0.5,
+        "expected_goals_conceded": 36.0,
+        "clean_sheets": 10,
+        "now_cost": 50,
         "status": "a",
     }
     defaults.update(overrides)
@@ -178,12 +206,12 @@ class TestPositionalScoringAttacker:
 
 
 class TestPositionalScoringDefender:
-    """test_positional_scoring_defender: DEF vs weak attack scores >= 5% higher."""
+    """test_positional_scoring_defender: DEF vs weak attack scores >= 10% higher."""
 
-    def test_defender_vs_weak_attack_scores_higher(self):
+    def test_defender_vs_weak_attack_bigger_boost(self):
+        """DEF vs bottom-3 attack scores ≥10% higher than vs top-3."""
         scorer = FixtureAwareScorer()
 
-        # Build teams: 3 weak attack, 3 strong attack, rest average
         teams = _make_teams_map()
         # Weak attack team (id=5)
         teams[5] = _make_team(5, "Weak", strength_attack_home=900, strength_attack_away=900)
@@ -199,7 +227,7 @@ class TestPositionalScoringDefender:
         vs_strong = scorer.score_player(defender, strong_opp, teams)
 
         ratio = vs_weak.final_score / vs_strong.final_score
-        assert ratio >= 1.05, f"Expected >= 5% difference, got {ratio:.3f}x"
+        assert ratio >= 1.10, f"Expected >= 10% difference, got {ratio:.3f}x"
 
 
 class TestMultiplierBounds:
@@ -373,3 +401,101 @@ class TestBuildFixtureLookup:
         assert len(lookup[1]) == 2
         assert lookup[1][0]["opponent_id"] == 2
         assert lookup[1][1]["opponent_id"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Enhanced Defensive Scoring Tests
+# ---------------------------------------------------------------------------
+
+class TestDefenderFDRSteeperThanAttacker:
+    """DEF FDR 1 vs FDR 5 spread should be wider than FWD."""
+
+    def test_defender_fdr_steeper_than_attacker(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+
+        # Same base stats, different positions
+        fwd = _make_player(id=1, team=1)
+        defender = _make_defender(id=2, team=1)
+
+        easy = _make_fixture_lookup(1, 5, is_home=True, fdr=1)
+        hard = _make_fixture_lookup(1, 5, is_home=True, fdr=5)
+
+        fwd_easy = scorer.score_player(fwd, easy, teams)
+        fwd_hard = scorer.score_player(fwd, hard, teams)
+        fwd_spread = fwd_easy.final_score / fwd_hard.final_score
+
+        def_easy = scorer.score_player(defender, easy, teams)
+        def_hard = scorer.score_player(defender, hard, teams)
+        def_spread = def_easy.final_score / def_hard.final_score
+
+        assert def_spread > fwd_spread, (
+            f"DEF spread ({def_spread:.3f}) should be wider than "
+            f"FWD spread ({fwd_spread:.3f})"
+        )
+
+
+class TestGKPCleanSheetFactor:
+    """GKP with high CS rate scores higher than GKP with low CS rate."""
+
+    def test_high_cs_gkp_scores_higher(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        fixture = _make_fixture_lookup(2, 5, is_home=True, fdr=3)
+
+        # High CS rate GKP: 15 CS in 30 appearances (0.50 per 90)
+        high_cs = _make_gkp(id=20, team=2, clean_sheets=15)
+        # Low CS rate GKP: 3 CS in 30 appearances (0.10 per 90)
+        low_cs = _make_gkp(id=21, team=2, clean_sheets=3)
+
+        high_result = scorer.score_player(high_cs, fixture, teams)
+        low_result = scorer.score_player(low_cs, fixture, teams)
+
+        assert high_result.final_score > low_result.final_score, (
+            f"High CS GKP ({high_result.final_score}) should score higher "
+            f"than low CS GKP ({low_result.final_score})"
+        )
+
+
+class TestDefenderMultiplierBounds:
+    """Total multiplier within [0.70, 1.45] for DEF/GKP."""
+
+    def test_extreme_best_case_def(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        # Very weak attack opponent
+        teams[5] = _make_team(5, "VeryWeak", strength_attack_away=800)
+
+        defender = _make_defender(team=2)
+        fixture = _make_fixture_lookup(2, 5, is_home=True, fdr=1)
+
+        result = scorer.score_player(defender, fixture, teams)
+        mult = result.fixtures[0].fixture_multiplier
+        assert mult <= MULTIPLIER_MAX_DEF, f"DEF multiplier {mult} > {MULTIPLIER_MAX_DEF}"
+        assert mult >= MULTIPLIER_MIN_DEF, f"DEF multiplier {mult} < {MULTIPLIER_MIN_DEF}"
+
+    def test_extreme_worst_case_def(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        # Very strong attack opponent
+        teams[5] = _make_team(5, "VeryStrong", strength_attack_home=1600)
+
+        defender = _make_defender(team=2)
+        fixture = _make_fixture_lookup(2, 5, is_home=False, fdr=5)
+
+        result = scorer.score_player(defender, fixture, teams)
+        mult = result.fixtures[0].fixture_multiplier
+        assert mult >= MULTIPLIER_MIN_DEF, f"DEF multiplier {mult} < {MULTIPLIER_MIN_DEF}"
+        assert mult <= MULTIPLIER_MAX_DEF, f"DEF multiplier {mult} > {MULTIPLIER_MAX_DEF}"
+
+    def test_gkp_bounds(self):
+        scorer = FixtureAwareScorer()
+        teams = _make_teams_map()
+        teams[5] = _make_team(5, "VeryWeak", strength_attack_away=800)
+
+        gkp = _make_gkp(team=2)
+        fixture = _make_fixture_lookup(2, 5, is_home=True, fdr=1)
+
+        result = scorer.score_player(gkp, fixture, teams)
+        mult = result.fixtures[0].fixture_multiplier
+        assert MULTIPLIER_MIN_DEF <= mult <= MULTIPLIER_MAX_DEF

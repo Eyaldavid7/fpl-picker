@@ -64,28 +64,44 @@ class ScoredPlayer:
 # Constants
 # ---------------------------------------------------------------------------
 
-FDR_FACTORS: dict[int, float] = {
-    1: 1.15,
-    2: 1.08,
-    3: 1.0,
-    4: 0.92,
-    5: 0.85,
+# Attackers (FWD/MID) — original curve
+FDR_FACTORS_ATTACK: dict[int, float] = {
+    1: 1.15, 2: 1.08, 3: 1.0, 4: 0.92, 5: 0.85,
 }
+
+# Defenders (DEF/GKP) — steeper: fixture difficulty matters MORE
+FDR_FACTORS_DEFENCE: dict[int, float] = {
+    1: 1.25, 2: 1.12, 3: 1.0, 4: 0.88, 5: 0.75,
+}
+
+# Legacy alias for tests that import it
+FDR_FACTORS = FDR_FACTORS_ATTACK
 
 HOME_FACTOR = 1.05
 AWAY_FACTOR = 0.95
 
-# Multiplier clamp range
+# Multiplier clamp range — attack positions
 MULTIPLIER_MIN = 0.75
 MULTIPLIER_MAX = 1.35
 
-# Opponent strength factor clamp
+# Multiplier clamp range — defensive positions (wider)
+MULTIPLIER_MIN_DEF = 0.70
+MULTIPLIER_MAX_DEF = 1.45
+
+# Opponent strength factor clamp — attack positions
 OPP_STRENGTH_MIN = 0.90
 OPP_STRENGTH_MAX = 1.10
+
+# Opponent strength factor clamp — defensive positions (wider)
+OPP_STRENGTH_MIN_DEF = 0.82
+OPP_STRENGTH_MAX_DEF = 1.18
 
 # Positional factor clamp
 POSITIONAL_MIN = 0.90
 POSITIONAL_MAX = 1.15
+
+# Clean sheet baseline: ~33% of matches result in CS for average DEF
+CS_BASELINE = 0.33
 
 # Approximate PL per-90 baselines
 POSITIONAL_BASELINES: dict[str, dict[str, float]] = {
@@ -156,6 +172,9 @@ class FixtureAwareScorer:
         else:
             raw = 1.0
 
+        # DEF/GKP get wider clamp — opponent attack quality matters more
+        if player.position in (Position.DEF, Position.GKP):
+            return max(OPP_STRENGTH_MIN_DEF, min(OPP_STRENGTH_MAX_DEF, raw))
         return max(OPP_STRENGTH_MIN, min(OPP_STRENGTH_MAX, raw))
 
     def _compute_positional_factor(self, player: Player) -> float:
@@ -195,7 +214,13 @@ class FixtureAwareScorer:
 
             # Lower xGC = better CS probability = higher factor
             xgc_ratio = xgc_baseline / xgc_per_90 if xgc_per_90 > 0 else 1.0
-            return max(POSITIONAL_MIN, min(POSITIONAL_MAX, xgc_ratio))
+
+            # Blend with clean sheet rate for DEF/GKP
+            cs_per_90 = player.clean_sheets / appearances
+            cs_ratio = cs_per_90 / CS_BASELINE if CS_BASELINE > 0 else 1.0
+            blended = 0.6 * xgc_ratio + 0.4 * cs_ratio
+
+            return max(POSITIONAL_MIN, min(POSITIONAL_MAX, blended))
 
     def _precompute_league_avgs(self, teams: dict[int, Team]) -> dict[str, float]:
         """Pre-compute league average strength metrics (hoisted out of loop)."""
@@ -231,14 +256,19 @@ class FixtureAwareScorer:
         fixture_details: list[FixtureDetail] = []
         reasoning_parts: list[str] = []
 
+        is_defensive = player.position in (Position.DEF, Position.GKP)
+        fdr_table = FDR_FACTORS_DEFENCE if is_defensive else FDR_FACTORS_ATTACK
+        mult_min = MULTIPLIER_MIN_DEF if is_defensive else MULTIPLIER_MIN
+        mult_max = MULTIPLIER_MAX_DEF if is_defensive else MULTIPLIER_MAX
+
         for fix_info in player_fixtures:
             fdr = fix_info["fdr"]
             is_home = fix_info["is_home"]
             opponent_id = fix_info["opponent_id"]
             opponent_name = fix_info.get("opponent_name", f"Team {opponent_id}")
 
-            # FDR factor
-            fdr_factor = FDR_FACTORS.get(fdr, 1.0)
+            # FDR factor (steeper curve for DEF/GKP)
+            fdr_factor = fdr_table.get(fdr, 1.0)
 
             # Home/away factor
             ha_factor = HOME_FACTOR if is_home else AWAY_FACTOR
@@ -252,9 +282,15 @@ class FixtureAwareScorer:
             else:
                 opp_factor = 1.0
 
+            # Clean sheet probability factor (DEF/GKP only)
+            cs_factor = 1.0
+            if is_defensive and opponent_team:
+                # Reuse opp_factor as CS proxy: weak attack → bonus, strong → penalty
+                cs_factor = max(0.90, min(1.15, opp_factor))
+
             # Combined fixture multiplier (clamped)
-            raw_multiplier = fdr_factor * ha_factor * opp_factor
-            fixture_multiplier = max(MULTIPLIER_MIN, min(MULTIPLIER_MAX, raw_multiplier))
+            raw_multiplier = fdr_factor * ha_factor * opp_factor * cs_factor
+            fixture_multiplier = max(mult_min, min(mult_max, raw_multiplier))
 
             # Per-fixture score (fully multiplicative)
             fixture_score = round(base_score * fixture_multiplier * positional_factor, 2)
