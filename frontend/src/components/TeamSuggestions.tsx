@@ -9,6 +9,9 @@ import {
   Loader2,
   CheckCircle2,
   ArrowDownUp,
+  Star,
+  ShieldCheck,
+  Crown,
 } from "lucide-react";
 import type {
   SubstituteResponse,
@@ -16,6 +19,10 @@ import type {
   SquadPlayerFixture,
   TransferResponse,
   TransferSuggestion,
+  CaptainResponse,
+  CaptainRanking,
+  BenchOrderResponse,
+  BenchPlayerDetail,
   Position,
 } from "@/types";
 import FDRBadge from "@/components/FDRBadge";
@@ -29,11 +36,17 @@ interface TeamSuggestionsProps {
   transfersLoading: boolean;
   onFetchTransfers: (budgetRemaining: number, freeTransfers: number) => void;
   teamBank?: number; // Bank balance in millions from team ID import
+  captainData?: CaptainResponse;
+  captainLoading?: boolean;
+  captainMode?: string;
+  onCaptainModeChange?: (mode: string) => void;
+  benchData?: BenchOrderResponse;
+  benchLoading?: boolean;
 }
 
 // ---------- Helpers ----------
 
-type Tab = "substitutions" | "transfers";
+type Tab = "substitutions" | "transfers" | "captain" | "bench";
 
 const positionBadgeClass: Record<Position, string> = {
   GKP: "fpl-badge fpl-badge-gkp",
@@ -298,6 +311,12 @@ export default function TeamSuggestions({
   transfersLoading,
   onFetchTransfers,
   teamBank,
+  captainData,
+  captainLoading = false,
+  captainMode = "safe",
+  onCaptainModeChange,
+  benchData,
+  benchLoading = false,
 }: TeamSuggestionsProps) {
   const [activeTab, setActiveTab] = useState<Tab>("substitutions");
   const [budgetRemaining, setBudgetRemaining] = useState(0);
@@ -321,6 +340,16 @@ export default function TeamSuggestions({
       key: "transfers",
       label: "Transfers",
       icon: <ArrowDownUp className="h-4 w-4" />,
+    },
+    {
+      key: "captain",
+      label: "Captain",
+      icon: <Star className="h-4 w-4" />,
+    },
+    {
+      key: "bench",
+      label: "Bench",
+      icon: <ShieldCheck className="h-4 w-4" />,
     },
   ];
 
@@ -691,6 +720,227 @@ export default function TeamSuggestions({
               <p className="text-sm text-[var(--muted-foreground)]">
                 Set your budget and free transfers, then click &quot;Get
                 Suggestions&quot; to find transfer recommendations.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== CAPTAIN TAB ===== */}
+      {activeTab === "captain" && (
+        <div className="space-y-4 animate-fade-in">
+          {/* Mode selector */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-[var(--muted-foreground)] mr-1">Mode:</span>
+            {(
+              [
+                { key: "safe", label: "Safe", activeClass: "bg-green-500/20 text-green-400 border-green-500/40" },
+                { key: "differential", label: "Differential", activeClass: "bg-[var(--accent)]/20 text-[var(--accent)] border-[var(--accent)]/40" },
+                { key: "aggressive", label: "Aggressive", activeClass: "bg-red-500/20 text-red-400 border-red-500/40" },
+              ] as const
+            ).map((m) => (
+              <button
+                key={m.key}
+                onClick={() => onCaptainModeChange?.(m.key)}
+                className={`px-3 py-1 text-xs rounded-full border transition-all duration-150 font-medium ${
+                  captainMode === m.key
+                    ? m.activeClass
+                    : "border-[var(--border)] text-[var(--muted-foreground)] opacity-50 hover:opacity-80"
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Loading */}
+          {captainLoading && (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="h-8 w-8 animate-spin text-[var(--primary)]" />
+            </div>
+          )}
+
+          {/* Captain data */}
+          {!captainLoading && captainData && captainData.rankings.length > 0 && (
+            <div className="space-y-4">
+              {/* Top picks: Captain + Vice */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/5 p-4">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <Crown className="h-4 w-4 text-[var(--primary)]" />
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--primary)]">Captain</p>
+                  </div>
+                  <p className="font-bold text-lg">{captainData.rankings[0].web_name}</p>
+                  <div className="flex items-center gap-2 mt-1 text-xs text-[var(--muted-foreground)]">
+                    <span className={positionBadgeClass[captainData.rankings[0].position]}>
+                      {captainData.rankings[0].position}
+                    </span>
+                    <span>{captainData.rankings[0].team_name}</span>
+                  </div>
+                  {captainData.rankings[0].opponent && captainData.rankings[0].fdr != null && (
+                    <p className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] mt-1">
+                      <span>vs {captainData.rankings[0].opponent}</span>
+                      <FDRBadge
+                        difficulty={captainData.rankings[0].fdr}
+                        opponentShortName={parseOpponent(captainData.rankings[0].opponent).opponentShortName}
+                        isHome={parseOpponent(captainData.rankings[0].opponent).isHome}
+                        compact
+                      />
+                    </p>
+                  )}
+                  <p className="text-sm font-bold text-[var(--primary)] mt-2">
+                    {captainData.captain_xpts.toFixed(1)} xPts (2x = {(captainData.captain_xpts * 2).toFixed(1)})
+                  </p>
+                  {captainData.rankings[0].reasoning && (
+                    <p className="text-[10px] text-[var(--muted-foreground)] mt-1">
+                      {captainData.rankings[0].reasoning}
+                    </p>
+                  )}
+                </div>
+                {captainData.rankings.length > 1 && (
+                  <div className="rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/5 p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--accent)] mb-1">Vice Captain</p>
+                    <p className="font-bold text-lg">{captainData.rankings[1].web_name}</p>
+                    <div className="flex items-center gap-2 mt-1 text-xs text-[var(--muted-foreground)]">
+                      <span className={positionBadgeClass[captainData.rankings[1].position]}>
+                        {captainData.rankings[1].position}
+                      </span>
+                      <span>{captainData.rankings[1].team_name}</span>
+                    </div>
+                    {captainData.rankings[1].opponent && captainData.rankings[1].fdr != null && (
+                      <p className="flex items-center gap-1.5 text-xs text-[var(--muted-foreground)] mt-1">
+                        <span>vs {captainData.rankings[1].opponent}</span>
+                        <FDRBadge
+                          difficulty={captainData.rankings[1].fdr}
+                          opponentShortName={parseOpponent(captainData.rankings[1].opponent).opponentShortName}
+                          isHome={parseOpponent(captainData.rankings[1].opponent).isHome}
+                          compact
+                        />
+                      </p>
+                    )}
+                    <p className="text-sm font-bold text-[var(--accent)] mt-2">
+                      {captainData.vice_captain_xpts.toFixed(1)} xPts
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Full rankings table */}
+              {captainData.rankings.length > 2 && (
+                <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
+                  <table className="fpl-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Player</th>
+                        <th>Pos</th>
+                        <th>Team</th>
+                        <th>Opponent</th>
+                        <th>FDR</th>
+                        <th>xPts</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {captainData.rankings.slice(0, 8).map((r, idx) => (
+                        <tr key={r.player_id} className={idx < 2 ? "bg-[var(--primary)]/5" : ""}>
+                          <td className="font-bold text-[var(--muted-foreground)]">{idx + 1}</td>
+                          <td className="font-medium">{r.web_name}</td>
+                          <td>
+                            <span className={positionBadgeClass[r.position]}>{r.position}</span>
+                          </td>
+                          <td className="text-[var(--muted-foreground)]">{r.team_name}</td>
+                          <td className="text-[var(--muted-foreground)]">
+                            {r.opponent || "--"}
+                          </td>
+                          <td>
+                            {r.fdr != null && r.opponent ? (
+                              <FDRBadge
+                                difficulty={r.fdr}
+                                opponentShortName={parseOpponent(r.opponent).opponentShortName}
+                                isHome={parseOpponent(r.opponent).isHome}
+                                compact
+                              />
+                            ) : "--"}
+                          </td>
+                          <td className="text-[var(--primary)] font-semibold">{r.predicted_points.toFixed(1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* No data */}
+          {!captainLoading && !captainData && (
+            <div className="flex flex-col items-center py-10 text-center">
+              <Star className="h-10 w-10 text-[var(--muted-foreground)] mb-3" />
+              <p className="text-sm text-[var(--muted-foreground)]">
+                Import your squad via Team ID for captain recommendations.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===== BENCH TAB ===== */}
+      {activeTab === "bench" && (
+        <div className="space-y-4 animate-fade-in">
+          {/* Loading */}
+          {benchLoading && (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="h-8 w-8 animate-spin text-[var(--accent)]" />
+            </div>
+          )}
+
+          {/* Bench data */}
+          {!benchLoading && benchData && benchData.bench_players.length > 0 && (
+            <div className="space-y-4">
+              {/* Summary stat */}
+              <div className="flex items-center justify-between rounded-lg border border-[var(--accent)]/20 bg-[var(--accent)]/5 p-3">
+                <span className="text-sm text-[var(--muted-foreground)]">Expected auto-sub value</span>
+                <span className="text-sm font-bold text-[var(--accent)]">
+                  {benchData.expected_auto_sub_points.toFixed(2)} pts
+                </span>
+              </div>
+
+              {/* Bench player cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {benchData.bench_players.map((bp, idx) => (
+                  <div key={bp.player_id} className="rounded-lg border border-[var(--border)] bg-[var(--background)] p-3 hover-lift">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="inline-flex items-center justify-center h-6 w-6 rounded-full bg-[var(--muted)] text-xs font-bold text-[var(--muted-foreground)]">
+                        {idx + 1}
+                      </span>
+                      <span className={positionBadgeClass[bp.position as Position]}>{bp.position}</span>
+                    </div>
+                    <p className="font-semibold truncate">{bp.web_name}</p>
+                    {bp.opponent && (
+                      <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
+                        vs {bp.opponent}
+                      </p>
+                    )}
+                    <p className="text-sm font-bold text-[var(--accent)] mt-1.5">
+                      {bp.final_score.toFixed(1)} xPts
+                    </p>
+                    {bp.reasoning && (
+                      <p className="text-[10px] text-[var(--muted-foreground)] mt-1 border-t border-[var(--border)] pt-1">
+                        {bp.reasoning}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* No data */}
+          {!benchLoading && !benchData && (
+            <div className="flex flex-col items-center py-10 text-center">
+              <ShieldCheck className="h-10 w-10 text-[var(--muted-foreground)] mb-3" />
+              <p className="text-sm text-[var(--muted-foreground)]">
+                Import your squad via Team ID for bench order recommendations.
               </p>
             </div>
           )}

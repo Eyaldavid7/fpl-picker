@@ -16,10 +16,12 @@ This is the single scoring function consumed by:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 from app.data.fpl_client import get_fpl_client
 from app.data.models import Fixture, Player, Position, Team
+from app.prediction.temporal import get_temporal_features
 
 logger = logging.getLogger(__name__)
 
@@ -100,11 +102,18 @@ OPP_STRENGTH_MAX_DEF = 1.30
 POSITIONAL_MIN = 0.90
 POSITIONAL_MAX = 1.15
 
+# Trend bonus factors for temporal analysis
+TREND_FACTORS: dict[str, float] = {"improving": 1.05, "declining": 0.95, "stable": 1.0}
+
 # Clean sheet baseline: ~33% of matches result in CS for average DEF
 CS_BASELINE = 0.33
 
-# Base CS probability (~30% for average PL match)
+# Base CS probability — Poisson baseline: exp(-AVG_GOALS_PER_MATCH) ≈ 0.26,
+# rounded to 0.30 to account for defensive structure above pure Poisson
 CS_PROB_BASE = 0.30
+
+# PL average goals scored per team per match (used in Poisson CS model)
+AVG_GOALS_PER_MATCH = 1.35
 
 # Approximate PL per-90 baselines
 POSITIONAL_BASELINES: dict[str, dict[str, float]] = {
@@ -129,17 +138,54 @@ class FixtureAwareScorer:
     """
 
     def _compute_base_score(self, player: Player) -> float:
-        """Compute base score with form regression (0.5/0.5 weighting)."""
+        """Compute base score with dynamic form/PPG weighting.
+
+        In-form players (form > PPG) are weighted 65/35 toward recent form.
+        Out-of-form players (form < PPG) are weighted 55/45 toward recent form.
+        Fallback to single non-zero value when one is missing.
+        """
         form = player.form
         ppg = player.points_per_game
 
         if form > 0 and ppg > 0:
-            return round(0.5 * form + 0.5 * ppg, 2)
+            if form > ppg:
+                # In-form: lean on recent form
+                return round(0.65 * form + 0.35 * ppg, 2)
+            elif form < ppg:
+                # Out-of-form: regress more toward season average
+                return round(0.55 * form + 0.45 * ppg, 2)
+            else:
+                # form == ppg: flat 50/50
+                return round(0.5 * form + 0.5 * ppg, 2)
         if form > 0:
             return round(form, 2)
         if ppg > 0:
             return round(ppg, 2)
         return 0.01
+
+    def _compute_form_momentum(self, player: Player) -> float:
+        """Compute a form momentum multiplier based on form/PPG ratio.
+
+        Hot streak  (ratio > 1.3): factor = 1.05
+        Cold streak (ratio < 0.7): factor = 0.95
+        Otherwise:                 factor = 1.0
+
+        Clamped to [0.90, 1.10].
+        """
+        ppg = player.points_per_game
+        if ppg <= 0:
+            return 1.0
+
+        momentum_ratio = player.form / ppg
+
+        if momentum_ratio > 1.3:
+            factor = 1.05
+        elif momentum_ratio < 0.7:
+            factor = 0.95
+        else:
+            factor = 1.0
+
+        return max(0.90, min(1.10, factor))
 
     def _compute_opponent_strength_factor(
         self,
@@ -237,25 +283,31 @@ class FixtureAwareScorer:
     ) -> float:
         """Compute clean sheet probability factor independently for DEF/GKP.
 
-        Models CS probability from opponent's attacking strength relative to
-        league average. Returns a multiplicative factor clamped to [0.85, 1.20].
+        Uses a Poisson model: lambda = expected goals by opponent, scaled by
+        their attack strength relative to the league average.
+        P(CS) = exp(-lambda) — Poisson probability of conceding 0 goals.
+        Returns a multiplicative factor relative to CS_PROB_BASE, clamped to
+        [0.80, 1.25].
         """
         if is_home:
             opp_attack = opponent.strength_attack_away
-            avg = league_avgs["attack_away"]
+            league_avg = league_avgs["attack_away"]
         else:
             opp_attack = opponent.strength_attack_home
-            avg = league_avgs["attack_home"]
+            league_avg = league_avgs["attack_home"]
 
-        # ratio < 1 means weak opponent attack → higher CS prob → bonus
-        ratio = opp_attack / avg if avg > 0 else 1.0
-        # CS probability adjusted by opponent quality
-        cs_prob = CS_PROB_BASE / ratio if ratio > 0 else CS_PROB_BASE
-        cs_prob = min(0.55, max(0.10, cs_prob))
+        # Scale PL average goals by opponent's relative attack strength
+        if league_avg > 0 and opp_attack > 0:
+            lam = AVG_GOALS_PER_MATCH * (opp_attack / league_avg)
+        else:
+            lam = AVG_GOALS_PER_MATCH
 
-        # Convert to multiplier: baseline CS prob (0.30) → factor 1.0
+        # Poisson probability of conceding exactly 0 goals
+        cs_prob = math.exp(-lam)
+
+        # Convert to multiplier: CS_PROB_BASE → factor 1.0
         factor = cs_prob / CS_PROB_BASE
-        return max(0.85, min(1.20, factor))
+        return max(0.80, min(1.25, factor))
 
     def _compute_minutes_factor(self, player: Player) -> float:
         """Compute minutes/availability probability factor.
@@ -304,6 +356,7 @@ class FixtureAwareScorer:
         teams: dict[int, Team],
         teams_name_map: dict[int, str] | None = None,
         league_avgs: dict[str, float] | None = None,
+        temporal_data: dict | None = None,
     ) -> ScoredPlayer:
         """Score a single player with fixture-aware expected points.
 
@@ -314,6 +367,24 @@ class FixtureAwareScorer:
             league_avgs = self._precompute_league_avgs(teams)
 
         base_score = self._compute_base_score(player)
+        form_momentum = self._compute_form_momentum(player)
+        base_score = round(base_score * form_momentum, 2)
+
+        # Temporal window blending (if available, overrides simple form/PPG)
+        if temporal_data and "window_3" in temporal_data:
+            w3_ppg = temporal_data.get("window_3", {}).get("ppg", 0)
+            w5_ppg = temporal_data.get("window_5", {}).get("ppg", 0)
+            w10_ppg = temporal_data.get("window_10", {}).get("ppg", 0)
+            if w3_ppg > 0 or w5_ppg > 0 or w10_ppg > 0:
+                temporal_score = 0.50 * w3_ppg + 0.30 * w5_ppg + 0.20 * w10_ppg
+                # Blend temporal with existing base: 70% temporal, 30% original base
+                base_score = round(0.70 * temporal_score + 0.30 * base_score, 2)
+
+            # Apply trend bonus
+            trend = temporal_data.get("trend", "stable")
+            trend_factor = TREND_FACTORS.get(trend, 1.0)
+            base_score = round(base_score * trend_factor, 2)
+
         positional_factor = self._compute_positional_factor(player)
 
         player_fixtures = fixture_lookup.get(player.team, [])
@@ -446,6 +517,9 @@ class FixtureAwareScorer:
         # Pre-compute league averages (once, not per-player)
         league_avgs = self._precompute_league_avgs(teams_map)
 
+        # Fetch temporal data for all players
+        temporal_features = get_temporal_features()
+
         # Score each player
         results: dict[int, ScoredPlayer] = {}
         for pid in player_ids:
@@ -453,8 +527,16 @@ class FixtureAwareScorer:
             if player is None:
                 logger.warning("Player ID %d not found in FPL data", pid)
                 continue
+
+            # Fetch temporal data (graceful — None on failure)
+            try:
+                temporal_data = await temporal_features.compute_windows(pid)
+            except Exception:
+                temporal_data = None
+
             results[pid] = self.score_player(
-                player, fixture_lookup, teams_map, teams_name_map, league_avgs
+                player, fixture_lookup, teams_map, teams_name_map, league_avgs,
+                temporal_data=temporal_data,
             )
 
         return results
@@ -484,10 +566,18 @@ class FixtureAwareScorer:
         fixture_lookup = build_fixture_lookup(next_fixtures, teams_name_map)
         league_avgs = self._precompute_league_avgs(teams_map)
 
+        temporal_features = get_temporal_features()
+
         results: dict[int, ScoredPlayer] = {}
         for player in all_players:
+            try:
+                temporal_data = await temporal_features.compute_windows(player.id)
+            except Exception:
+                temporal_data = None
+
             results[player.id] = self.score_player(
-                player, fixture_lookup, teams_map, teams_name_map, league_avgs
+                player, fixture_lookup, teams_map, teams_name_map, league_avgs,
+                temporal_data=temporal_data,
             )
 
         return results

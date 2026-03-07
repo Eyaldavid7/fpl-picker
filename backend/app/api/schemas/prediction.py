@@ -199,4 +199,6 @@ class BacktestResponse(BaseModel):
     gw_end: int
     mae: float
     cumulative_points: float
+    r_squared: float = 0.0
+    top_captain_accuracy: float = 0.0
     results: list[BacktestGameweekResult]

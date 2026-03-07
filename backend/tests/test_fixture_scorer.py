@@ -360,19 +360,31 @@ class TestScorerConsistency:
 
 
 class TestFormRegressionWeighting:
-    """test_form_regression_weighting: base uses 0.5/0.5, not 0.65/0.35."""
+    """Dynamic form/PPG weighting: in-form 65/35, out-of-form 55/45, equal 50/50."""
 
-    def test_weighting(self):
+    def test_in_form_weighting(self):
+        """form > ppg → 0.65 * form + 0.35 * ppg."""
         scorer = FixtureAwareScorer()
         player = _make_player(form=6.0, points_per_game=4.0)
-
         base = scorer._compute_base_score(player)
-        expected = round(0.5 * 6.0 + 0.5 * 4.0, 2)  # 5.0
+        expected = round(0.65 * 6.0 + 0.35 * 4.0, 2)  # 5.3
         assert base == expected
 
-        # Verify it's NOT the old weighting
-        old = round(0.65 * 6.0 + 0.35 * 4.0, 2)  # 5.3
-        assert base != old
+    def test_out_of_form_weighting(self):
+        """form < ppg → 0.55 * form + 0.45 * ppg."""
+        scorer = FixtureAwareScorer()
+        player = _make_player(form=3.0, points_per_game=6.0)
+        base = scorer._compute_base_score(player)
+        expected = round(0.55 * 3.0 + 0.45 * 6.0, 2)  # 4.35
+        assert base == expected
+
+    def test_equal_form_ppg_weighting(self):
+        """form == ppg → 0.5 * form + 0.5 * ppg."""
+        scorer = FixtureAwareScorer()
+        player = _make_player(form=5.0, points_per_game=5.0)
+        base = scorer._compute_base_score(player)
+        expected = round(0.5 * 5.0 + 0.5 * 5.0, 2)  # 5.0
+        assert base == expected
 
 
 class TestBuildFixtureLookup:

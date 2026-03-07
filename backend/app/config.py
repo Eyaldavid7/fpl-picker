@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # Gemini Vision API
     gemini_api_key: str = ""
 
+    # Admin API key for protected endpoints (e.g. /refresh)
+    admin_api_key: str = ""
+
     # CORS
     cors_origins: list[str] = [
         "http://localhost:3000",

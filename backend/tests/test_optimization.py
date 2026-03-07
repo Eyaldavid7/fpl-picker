@@ -5,9 +5,12 @@ Covers:
 - ILP solver (valid squad, captain/VC, locked/excluded)
 - GA solver (multiple diverse squads, feasibility)
 - OptimizationEngine facade
+- Fixture enrichment on the optimize_squad endpoint
 """
 
 from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -20,6 +23,7 @@ from app.optimization.engine import OptimizationEngine
 from app.optimization.genetic_algorithm import GASolver
 from app.optimization.ilp_solver import ILPSolver
 from app.optimization.models import OptimizationResult
+from app.data.models import Fixture
 
 # ---------------------------------------------------------------------------
 # Mock player data (36 players across 8 teams, all 4 positions)
@@ -508,3 +512,195 @@ class TestOptimizationEngine:
         assert "captain" in d
         assert "predicted_points" in d
         assert d["method"] == "ilp"
+
+
+# ======================================================================
+# Fixture enrichment tests (optimize_squad endpoint)
+# ======================================================================
+
+
+def _make_mock_fpl_client(current_gw: int = 27):
+    """Create a mock FPL client for fixture enrichment tests.
+
+    Args:
+        current_gw: The gameweek number that get_current_gameweek returns.
+    """
+    mock = AsyncMock()
+    mock.get_current_gameweek.return_value = current_gw
+
+    # Fixtures: teams 1-8 play each other in pairs for next GW
+    # Team 1 (H) vs Team 2 (A), Team 3 (H) vs Team 4 (A),
+    # Team 5 (H) vs Team 6 (A), Team 7 (H) vs Team 8 (A)
+    mock.get_typed_fixtures.return_value = [
+        Fixture(id=101, event=current_gw + 1, team_h=1, team_a=2,
+                team_h_difficulty=2, team_a_difficulty=4),
+        Fixture(id=102, event=current_gw + 1, team_h=3, team_a=4,
+                team_h_difficulty=3, team_a_difficulty=3),
+        Fixture(id=103, event=current_gw + 1, team_h=5, team_a=6,
+                team_h_difficulty=2, team_a_difficulty=4),
+        Fixture(id=104, event=current_gw + 1, team_h=7, team_a=8,
+                team_h_difficulty=3, team_a_difficulty=2),
+    ]
+
+    mock.get_teams_map.return_value = {
+        1: "ARS", 2: "MCI", 3: "CHE", 4: "LIV",
+        5: "MUN", 6: "TOT", 7: "BHA", 8: "CRY",
+    }
+
+    return mock
+
+
+@pytest.fixture
+def opt_client():
+    """FastAPI TestClient for optimization endpoint tests."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    return TestClient(app)
+
+
+class TestFixtureEnrichment:
+    """Tests for fixture enrichment in the optimize_squad endpoint."""
+
+    def _make_request_body(self) -> dict:
+        """Build a valid optimization request using MOCK_PLAYERS/PREDICTIONS."""
+        return {
+            "players": MOCK_PLAYERS,
+            "predictions": {str(k): v for k, v in PREDICTIONS.items()},
+            "budget": 1000,
+            "method": "ilp",
+        }
+
+    def test_fixture_enrichment_populates_opponent_and_fdr(self, opt_client):
+        """Squad players should have next_opponent and fdr after enrichment."""
+        mock = _make_mock_fpl_client(current_gw=27)
+
+        with patch(
+            "app.data.fpl_client.get_fpl_client", return_value=mock
+        ):
+            response = opt_client.post(
+                "/api/optimize/squad", json=self._make_request_body()
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        squad = data["squad"]
+        assert len(squad) == 15
+
+        # Every player should have fixture info since all 8 teams have fixtures
+        enriched = [p for p in squad if p["next_opponent"] is not None]
+        assert len(enriched) == 15, (
+            f"Expected all 15 players enriched, got {len(enriched)}"
+        )
+
+        for player in enriched:
+            assert player["fdr"] is not None
+            assert player["fdr"] >= 1
+            assert player["fdr"] <= 5
+            # next_opponent should contain (H) or (A)
+            assert "(H)" in player["next_opponent"] or "(A)" in player["next_opponent"]
+
+    def test_fixture_enrichment_correct_opponent(self, opt_client):
+        """Verify the opponent name and venue are correct for a known team."""
+        mock = _make_mock_fpl_client(current_gw=27)
+
+        with patch(
+            "app.data.fpl_client.get_fpl_client", return_value=mock
+        ):
+            response = opt_client.post(
+                "/api/optimize/squad", json=self._make_request_body()
+            )
+
+        assert response.status_code == 200
+        squad = response.json()["squad"]
+
+        # Find a player from team 1 (ARS) -- they play at home vs team 2 (MCI)
+        team1_players = [p for p in squad if p["team_id"] == 1]
+        for p in team1_players:
+            assert p["next_opponent"] == "MCI (H)"
+            assert p["fdr"] == 2  # team_h_difficulty for fixture 101
+
+        # Find a player from team 2 (MCI) -- they play away vs team 1 (ARS)
+        team2_players = [p for p in squad if p["team_id"] == 2]
+        for p in team2_players:
+            assert p["next_opponent"] == "ARS (A)"
+            assert p["fdr"] == 4  # team_a_difficulty for fixture 101
+
+    def test_gw38_edge_case_caps_at_38(self, opt_client):
+        """When current_gw=38, next_gw should be capped at 38 (not 39)."""
+        mock = _make_mock_fpl_client(current_gw=38)
+        # Override fixtures for GW38
+        mock.get_typed_fixtures.return_value = [
+            Fixture(id=201, event=38, team_h=1, team_a=2,
+                    team_h_difficulty=2, team_a_difficulty=4),
+            Fixture(id=202, event=38, team_h=3, team_a=4,
+                    team_h_difficulty=3, team_a_difficulty=3),
+            Fixture(id=203, event=38, team_h=5, team_a=6,
+                    team_h_difficulty=2, team_a_difficulty=4),
+            Fixture(id=204, event=38, team_h=7, team_a=8,
+                    team_h_difficulty=3, team_a_difficulty=2),
+        ]
+
+        with patch(
+            "app.data.fpl_client.get_fpl_client", return_value=mock
+        ):
+            response = opt_client.post(
+                "/api/optimize/squad", json=self._make_request_body()
+            )
+
+        assert response.status_code == 200
+
+        # Verify get_typed_fixtures was called with 38, not 39
+        mock.get_typed_fixtures.assert_called_once_with(38)
+
+        # Verify enrichment still works
+        squad = response.json()["squad"]
+        enriched = [p for p in squad if p["next_opponent"] is not None]
+        assert len(enriched) == 15
+
+    def test_fixture_fetch_failure_returns_null_opponent(self, opt_client):
+        """When fixture fetch fails, optimizer should still return results
+        with null next_opponent and fdr."""
+        mock = AsyncMock()
+        mock.get_current_gameweek.side_effect = RuntimeError("FPL API down")
+
+        with patch(
+            "app.data.fpl_client.get_fpl_client", return_value=mock
+        ):
+            response = opt_client.post(
+                "/api/optimize/squad", json=self._make_request_body()
+            )
+
+        assert response.status_code == 200
+        squad = response.json()["squad"]
+        assert len(squad) == 15
+
+        # All players should have null opponent data
+        for player in squad:
+            assert player["next_opponent"] is None
+            assert player["fdr"] is None
+
+    def test_fixture_teams_map_failure_fallback(self, opt_client):
+        """When get_teams_map fails, enrichment should gracefully degrade."""
+        mock = AsyncMock()
+        mock.get_current_gameweek.return_value = 27
+        mock.get_typed_fixtures.return_value = [
+            Fixture(id=101, event=28, team_h=1, team_a=2,
+                    team_h_difficulty=2, team_a_difficulty=4),
+        ]
+        mock.get_teams_map.side_effect = RuntimeError("teams API down")
+
+        with patch(
+            "app.data.fpl_client.get_fpl_client", return_value=mock
+        ):
+            response = opt_client.post(
+                "/api/optimize/squad", json=self._make_request_body()
+            )
+
+        assert response.status_code == 200
+        squad = response.json()["squad"]
+        assert len(squad) == 15
+
+        # All players should have null opponent data due to exception
+        for player in squad:
+            assert player["next_opponent"] is None
+            assert player["fdr"] is None

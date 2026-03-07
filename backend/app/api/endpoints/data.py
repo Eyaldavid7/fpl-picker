@@ -7,9 +7,11 @@ layer.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from starlette.status import HTTP_403_FORBIDDEN
 
 from app.api.schemas.player import PlayerDetailResponse, PlayerListResponse
+from app.config import get_settings
 from app.data.fpl_client import get_fpl_client
 from app.data.models import (
     Fixture,
@@ -19,6 +21,7 @@ from app.data.models import (
     Team,
 )
 from app.data.preprocessing import calculate_derived_features
+from app.rate_limit import limiter
 
 router = APIRouter()
 
@@ -232,8 +235,23 @@ async def get_live_gameweek(gameweek: int) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.post("/refresh")
-async def refresh_data() -> dict:
-    """Force-refresh cached FPL data."""
+@limiter.limit("5/minute")
+async def refresh_data(request: Request) -> dict:
+    """Force-refresh cached FPL data.
+
+    Protected by rate limiting (5 req/min) and an optional admin API key.
+    If ``FPL_ADMIN_API_KEY`` is set, requests must include a matching
+    ``X-Admin-Key`` header.
+    """
+    settings = get_settings()
+    if settings.admin_api_key:
+        provided = request.headers.get("X-Admin-Key", "")
+        if provided != settings.admin_api_key:
+            raise HTTPException(
+                status_code=HTTP_403_FORBIDDEN,
+                detail="Invalid or missing admin API key",
+            )
+
     client = get_fpl_client()
     client.cache.invalidate_all()
     await client.get_bootstrap()

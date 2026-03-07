@@ -162,12 +162,14 @@ class CaptainRequest(BaseModel):
     Attributes:
         player_ids: List of player IDs to consider for captaincy.
         gameweek: Target gameweek number (1-38). If omitted, defaults to next GW.
-        differential: If True, prefer low-ownership captains.
+        differential: If True, prefer low-ownership captains (legacy, use mode instead).
+        mode: Captain selection mode — "safe" | "differential" | "aggressive".
     """
 
     player_ids: list[int]
     gameweek: int | None = Field(default=None, ge=1, le=38)
     differential: bool = False
+    mode: str = "safe"  # "safe" | "differential" | "aggressive"
 
 
 class CaptainRanking(BaseModel):
@@ -182,6 +184,7 @@ class CaptainRanking(BaseModel):
     opponent: str = ""
     fdr: int | None = None
     reasoning: str = ""
+    ceiling_score: float = 0.0
 
 
 class CaptainResponse(BaseModel):

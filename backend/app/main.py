@@ -8,10 +8,17 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.api.router import api_router
 from app.config import get_settings
-from app.middleware import RequestLoggingMiddleware, register_exception_handlers
+from app.middleware import (
+    RequestLoggingMiddleware,
+    SecurityHeadersMiddleware,
+    register_exception_handlers,
+)
+from app.rate_limit import limiter
 from app.utils.logging import setup_logging
 
 
@@ -44,14 +51,23 @@ def create_app() -> FastAPI:
     # Configure structured logging before anything else
     setup_logging(debug=settings.debug)
 
+    # --- FPL-005: Disable Swagger/OpenAPI docs in production ---
+    is_production = os.getenv("ENV", "").lower() == "production"
+    docs_url: str | None = None if is_production else "/api/docs"
+    openapi_url: str | None = None if is_production else "/api/openapi.json"
+
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
         description="FPL Team Picker - ML-powered Fantasy Premier League assistant",
-        docs_url="/api/docs",
-        openapi_url="/api/openapi.json",
+        docs_url=docs_url,
+        openapi_url=openapi_url,
         lifespan=lifespan,
     )
+
+    # --- FPL-007: Rate limiter state & exception handler ---
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # CORS middleware
     app.add_middleware(
@@ -61,6 +77,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Security headers middleware
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # Request logging middleware
     app.add_middleware(RequestLoggingMiddleware)

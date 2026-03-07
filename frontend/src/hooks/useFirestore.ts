@@ -6,6 +6,7 @@ import {
   saveTeam,
   deleteTeam,
   updateTeamName,
+  upsertTeamByFplId,
 } from "@/lib/firestore";
 import type { SavedTeam } from "@/lib/firestore";
 
@@ -44,6 +45,22 @@ export function useDeleteTeam() {
 
   return useMutation<void, Error, string>({
     mutationFn: deleteTeam,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [...SAVED_TEAMS_KEY] });
+    },
+  });
+}
+
+/** Upsert a team by FPL team ID (update existing or create new). */
+export function useUpsertTeam() {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    string,
+    Error,
+    { fplTeamId: number; team: Omit<SavedTeam, "id" | "createdAt" | "updatedAt"> }
+  >({
+    mutationFn: ({ fplTeamId, team }) => upsertTeamByFplId(fplTeamId, team),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [...SAVED_TEAMS_KEY] });
     },

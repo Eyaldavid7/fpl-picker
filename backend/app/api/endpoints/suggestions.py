@@ -24,6 +24,7 @@ from app.api.schemas.suggestions import (
 from app.data.fpl_client import get_fpl_client
 from app.data.models import Player, Position, Team
 from app.prediction.fixture_scorer import FixtureAwareScorer, build_fixture_lookup, get_fixture_scorer
+from app.prediction.temporal import get_temporal_features
 
 logger = logging.getLogger(__name__)
 
@@ -84,15 +85,16 @@ def _scorer_adjusted_score(
     fixture_lookup: FixtureLookup,
     teams: dict[int, "Team"],
     league_avgs: dict[str, float] | None = None,
+    temporal_data: dict | None = None,
 ) -> float:
     """Score a player using the central FixtureAwareScorer.
 
     Replaces the old _predicted_score() + _fixture_adjusted_score() with the
     full fixture-aware pipeline (opponent strength, positional factors, ICT,
-    minutes probability, CS factor).
+    minutes probability, CS factor, temporal features).
     """
     scorer = get_fixture_scorer()
-    result = scorer.score_player(player, fixture_lookup, teams, league_avgs=league_avgs)
+    result = scorer.score_player(player, fixture_lookup, teams, league_avgs=league_avgs, temporal_data=temporal_data)
     return result.final_score
 
 
@@ -189,6 +191,15 @@ async def suggest_substitutes(
             detail=f"Player IDs not found in FPL data: {missing}",
         )
 
+    # Pre-fetch temporal data for all squad players
+    temporal_features = get_temporal_features()
+    temporal_map: dict[int, dict | None] = {}
+    for p in squad_players:
+        try:
+            temporal_map[p.id] = await temporal_features.compute_windows(p.id)
+        except Exception:
+            temporal_map[p.id] = None
+
     # Parse formation
     try:
         position_slots = _parse_formation(request.formation)
@@ -208,7 +219,7 @@ async def suggest_substitutes(
     for pos in (Position.GKP, Position.DEF, Position.MID, Position.FWD):
         group = by_position.get(pos, [])
         group.sort(
-            key=lambda p: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs),
+            key=lambda p: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs, temporal_map.get(p.id)),
             reverse=True,
         )
         n_start = position_slots.get(pos, 0)
@@ -217,10 +228,10 @@ async def suggest_substitutes(
 
     # Compute fixture-adjusted predicted scores
     starter_scores = {
-        p.id: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs) for p in starters
+        p.id: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs, temporal_map.get(p.id)) for p in starters
     }
     bench_scores = {
-        p.id: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs) for p in bench
+        p.id: _scorer_adjusted_score(p, fixture_lookup, teams_by_id, league_avgs, temporal_map.get(p.id)) for p in bench
     }
 
     # For each bench player, see if they outscore any starter in the same
@@ -375,9 +386,6 @@ async def suggest_transfers(
     transfer_scorer = get_fixture_scorer()
     transfer_league_avgs = transfer_scorer._precompute_league_avgs(teams_by_id)
 
-    def _score(p: Player) -> float:
-        return _scorer_adjusted_score(p, transfer_fixture_lookup, teams_by_id, transfer_league_avgs)
-
     # Build lookups
     player_map: dict[int, Player] = {p.id: p for p in all_players}
     squad_ids = set(request.squad_player_ids)
@@ -396,6 +404,19 @@ async def suggest_transfers(
             status_code=404,
             detail=f"Player IDs not found in FPL data: {missing}",
         )
+
+    # Pre-fetch temporal data for squad players (pool players skip temporal
+    # to avoid hundreds of API calls)
+    transfer_temporal = get_temporal_features()
+    transfer_temporal_map: dict[int, dict | None] = {}
+    for p in squad_players:
+        try:
+            transfer_temporal_map[p.id] = await transfer_temporal.compute_windows(p.id)
+        except Exception:
+            transfer_temporal_map[p.id] = None
+
+    def _score(p: Player) -> float:
+        return _scorer_adjusted_score(p, transfer_fixture_lookup, teams_by_id, transfer_league_avgs, transfer_temporal_map.get(p.id))
 
     # Existing team counts to enforce the 3-per-team rule
     team_counts: dict[int, int] = defaultdict(int)

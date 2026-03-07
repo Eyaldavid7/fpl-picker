@@ -343,6 +343,7 @@ export interface CaptainRequest {
   player_ids: number[];
   gameweek?: number;
   differential?: boolean;
+  mode?: string; // "safe" | "differential" | "aggressive"
 }
 
 /** A single captain ranking entry. */
@@ -356,6 +357,7 @@ export interface CaptainRanking {
   opponent: string;
   fdr: number | null;
   reasoning: string;
+  ceiling_score: number;
 }
 
 /** Response from the captain picker endpoint. */

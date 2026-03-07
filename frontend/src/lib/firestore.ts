@@ -8,6 +8,7 @@ import {
   doc,
   query,
   orderBy,
+  where,
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
@@ -100,6 +101,30 @@ export async function getTeam(id: string): Promise<SavedTeam | null> {
 export async function deleteTeam(id: string): Promise<void> {
   const docRef = doc(db, COLLECTION_NAME, id);
   await deleteDoc(docRef);
+}
+
+/** Upsert a team by FPL team ID: update if exists, create if not. */
+export async function upsertTeamByFplId(
+  fplTeamId: number,
+  team: Omit<SavedTeam, "id" | "createdAt" | "updatedAt">
+): Promise<string> {
+  const q = query(
+    collection(db, COLLECTION_NAME),
+    where("fplTeamId", "==", fplTeamId)
+  );
+  const snapshot = await getDocs(q);
+
+  if (!snapshot.empty) {
+    const existingId = snapshot.docs[0].id;
+    const docRef = doc(db, COLLECTION_NAME, existingId);
+    await updateDoc(docRef, {
+      ...team,
+      updatedAt: serverTimestamp(),
+    });
+    return existingId;
+  }
+
+  return saveTeam(team);
 }
 
 /** Update the name of a saved team. */

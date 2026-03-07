@@ -97,6 +97,8 @@ export default function OptimizerPage() {
 
   const [teamId, setTeamId] = useState("");
   const [loadedTeamLabel, setLoadedTeamLabel] = useState<string | null>(null);
+  const [captainMode, setCaptainMode] = useState<string>("safe");
+  const [lastOptimizedAt, setLastOptimizedAt] = useState<Date | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const updateFileInputRef = useRef<HTMLInputElement>(null);
@@ -245,6 +247,7 @@ export default function OptimizerPage() {
       .filter((p: MatchedPlayer) => p.player_id !== null)
       .map((p: MatchedPlayer) => p.player_id as number);
     setImportedPlayerIds(ids);
+    setLastOptimizedAt(new Date());
   };
 
   const handleSaveTeamIdTeam = () => {
@@ -282,6 +285,7 @@ export default function OptimizerPage() {
     if (optimize.data?.squad?.length) {
       const playerIds = optimize.data.squad.map((p) => p.player_id);
       squadFixtures.mutate({ player_ids: playerIds });
+      setLastOptimizedAt(new Date());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [optimize.data]);
@@ -302,7 +306,7 @@ export default function OptimizerPage() {
         squad_player_ids: playerIds,
         formation: optimize.data.formation,
       });
-      captainPicker.mutate({ player_ids: playerIds });
+      captainPicker.mutate({ player_ids: playerIds, mode: captainMode });
       // Auto-trigger bench optimizer
       const xiIds = optimize.data.squad.filter((p) => p.is_starter).map((p) => p.player_id);
       const benchIds = optimize.data.squad.filter((p) => !p.is_starter).map((p) => p.player_id);
@@ -321,10 +325,21 @@ export default function OptimizerPage() {
         formation,
       });
       // Auto-trigger captain picker
-      captainPicker.mutate({ player_ids: importedPlayerIds });
+      captainPicker.mutate({ player_ids: importedPlayerIds, mode: captainMode });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importedPlayerIds]);
+
+  // Re-trigger captain picker when mode changes (if squad is loaded)
+  useEffect(() => {
+    const playerIds =
+      optimize.data?.squad?.map((p) => p.player_id) ??
+      (importedPlayerIds.length > 0 ? importedPlayerIds : []);
+    if (playerIds.length > 0) {
+      captainPicker.mutate({ player_ids: playerIds, mode: captainMode });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [captainMode]);
 
   // Auto-trigger bench optimizer when team ID import data arrives (has XI/bench split)
   useEffect(() => {
@@ -339,6 +354,7 @@ export default function OptimizerPage() {
     }
     if (xiIds.length > 0 && benchIds.length > 0) {
       benchOptimizer.mutate({ xi_ids: xiIds, bench_ids: benchIds });
+      setLastOptimizedAt(new Date());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamIdImport.data, teamDisplayOverride]);
@@ -383,13 +399,16 @@ export default function OptimizerPage() {
       manuallyLoadedRef.current = true;
       setImportedPlayerIds(playerIds);
       setLoadedTeamLabel(teamName || `Saved team (${playerIds.length} players)`);
-      // Pre-fill team ID but don't auto-call API — user can import manually if needed
+      setTeamDisplayOverride(null);
+      setUpdateMessage(null);
       if (savedFplTeamId) {
         setTeamId(savedFplTeamId.toString());
+        // Actually import to get full player data (names, positions, XI/bench split)
+        teamIdImport.mutate(savedFplTeamId);
       } else {
         setTeamId("");
+        teamIdImport.reset();
       }
-      teamIdImport.reset();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     []
@@ -709,7 +728,14 @@ export default function OptimizerPage() {
 
           {/* Full squad list */}
           <div className="fpl-card">
-            <h2 className="text-lg font-semibold mb-4">Full Squad</h2>
+            <div className="flex items-baseline justify-between mb-4">
+              <h2 className="text-lg font-semibold">Full Squad</h2>
+              {lastOptimizedAt && (
+                <span className="text-[11px] text-[var(--muted-foreground)]">
+                  Last optimized: {lastOptimizedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
+            </div>
             <div className="overflow-x-auto">
               <table className="fpl-table">
                 <thead>
@@ -919,6 +945,8 @@ export default function OptimizerPage() {
           teamBank={teamIdImport.data?.bank}
           captainData={captainPicker.data}
           captainLoading={captainPicker.isPending}
+          captainMode={captainMode}
+          onCaptainModeChange={setCaptainMode}
           benchData={benchOptimizer.data}
           benchLoading={benchOptimizer.isPending}
         />
@@ -1066,6 +1094,9 @@ export default function OptimizerPage() {
                 </p>
                 <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
                   GW{teamIdImport.data.gameweek} · Rank {teamIdImport.data.overall_rank.toLocaleString()} · Bank {teamIdImport.data.bank.toFixed(1)}m · Value {teamIdImport.data.team_value.toFixed(1)}m
+                  {lastOptimizedAt && (
+                    <span> · Last optimized {lastOptimizedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                  )}
                 </p>
               </div>
               <span className="text-xs text-green-400 flex items-center gap-1">

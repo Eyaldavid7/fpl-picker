@@ -70,6 +70,36 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Middleware that adds security-related HTTP headers to every response.
+
+    Adds headers to mitigate common web vulnerabilities including MIME-type
+    sniffing, clickjacking, and cross-site scripting.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        """Add security headers to the response.
+
+        Args:
+            request: The incoming HTTP request.
+            call_next: The next middleware or route handler in the chain.
+
+        Returns:
+            The HTTP response with security headers applied.
+        """
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "0"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=()"
+        )
+        return response
+
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware that logs every HTTP request with timing information.
 

@@ -1,5 +1,6 @@
 {
   "projects": {
-    "default": "fpl-picker-app"
+    "default": "fpl-picker-app",
+    "firestore": "finance-categorizer-fbbb1"
   }
 }

@@ -257,6 +257,52 @@ async def import_by_team_id(request: TeamIdImportRequest):
         t["id"]: t["short_name"] for t in bootstrap.get("teams", [])
     }
 
+    # --- Apply pending transfers (made after current GW deadline) ---
+    pending_transfer_bank_adjustment = 0.0
+    try:
+        transfers = await client.get_entry_transfers(request.team_id)
+        pending_transfers = [t for t in transfers if t.get("event", 0) > current_gw]
+        if pending_transfers:
+            logger.info(
+                "Applying %d pending transfer(s) for team %d (GW %d)",
+                len(pending_transfers),
+                request.team_id,
+                current_gw,
+            )
+        picks_list = picks_data.get("picks", [])
+        for t in pending_transfers:
+            element_out = t.get("element_out")
+            element_in = t.get("element_in")
+            # Adjust bank: subtract net cost (in_cost - out_cost, in 0.1m units)
+            pending_transfer_bank_adjustment -= (
+                t.get("element_in_cost", 0) - t.get("element_out_cost", 0)
+            ) / 10
+            # Swap the player in the picks list
+            for pick in picks_list:
+                if pick["element"] == element_out:
+                    pick["element"] = element_in
+                    # If the transferred-out player was captain or vice-captain,
+                    # clear those flags (user will need to re-select)
+                    if pick.get("is_captain", False):
+                        pick["is_captain"] = False
+                        logger.info(
+                            "Cleared captain flag: player %d transferred out",
+                            element_out,
+                        )
+                    if pick.get("is_vice_captain", False):
+                        pick["is_vice_captain"] = False
+                        logger.info(
+                            "Cleared vice-captain flag: player %d transferred out",
+                            element_out,
+                        )
+                    break
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        logger.warning(
+            "Failed to fetch transfers for team %d, using deadline picks: %s",
+            request.team_id,
+            exc,
+        )
+
     # --- Process picks ---
     picks = picks_data.get("picks", [])
     starting_xi: list[int] = []
@@ -317,17 +363,8 @@ async def import_by_team_id(request: TeamIdImportRequest):
     # Bank and team value come from the picks endpoint (entry_history within picks)
     entry_history = picks_data.get("entry_history", {})
     bank = (entry_history.get("bank", 0) or 0) / 10  # convert from 0.1m units
+    bank += pending_transfer_bank_adjustment  # apply pending transfer costs
     team_value = (entry_history.get("value", 0) or 0) / 10  # convert from 0.1m units
-
-    # Adjust bank for pending transfers (made after current GW deadline)
-    try:
-        transfers = await client.get_entry_transfers(request.team_id)
-        for t in transfers:
-            if t.get("event", 0) > current_gw:
-                # Pending transfer: subtract net cost (in_cost - out_cost, in 0.1m units)
-                bank -= (t.get("element_in_cost", 0) - t.get("element_out_cost", 0)) / 10
-    except (httpx.HTTPStatusError, httpx.RequestError):
-        pass  # Non-critical: fall back to deadline bank
 
     return TeamIdImportResult(
         team_name=team_name,

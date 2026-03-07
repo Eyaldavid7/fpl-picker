@@ -1,6 +1,7 @@
 "use client";
 
 import type { SquadPlayer, Position } from "@/types";
+import FDRBadge from "@/components/FDRBadge";
 
 interface PitchViewProps {
   players: SquadPlayer[];
@@ -85,6 +86,14 @@ function PitchPlayer({ player, isCaptain, isViceCaptain }: PitchPlayerProps) {
         <span className={`rounded px-1 py-0.5 text-[9px] font-semibold leading-none ${isUnavailable ? "bg-red-500/20 text-red-400" : "bg-yellow-500/20 text-yellow-400"}`}>
           {isUnavailable ? "Out" : player.chance_of_playing != null ? `${player.chance_of_playing}%` : "doubt"}
         </span>
+      )}
+      {player.next_opponent && player.fdr != null && (
+        <FDRBadge
+          difficulty={player.fdr}
+          opponentShortName={player.next_opponent.replace(/\s*\([HA]\)\s*$/, "").trim().substring(0, 3)}
+          isHome={player.next_opponent.includes("(H)")}
+          compact
+        />
       )}
     </div>
   );

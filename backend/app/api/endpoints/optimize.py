@@ -23,10 +23,10 @@ from app.api.schemas.optimization import (
     CompareRequest,
     CompareResponse,
 )
+import app.data.fpl_client as _fpl_client_module
 from app.optimization.engine import OptimizationEngine
 from app.optimization.models import OptimizationResult
 from app.prediction.fixture_scorer import (
-    FixtureAwareScorer,
     build_fixture_lookup,
     get_fixture_scorer,
 )
@@ -128,9 +128,7 @@ async def optimize_squad(
 
     if not players or not predictions:
         # Auto-fetch live FPL data
-        from app.data.fpl_client import get_fpl_client
-
-        client = get_fpl_client()
+        client = _fpl_client_module.get_fpl_client()
         try:
             bootstrap = await client.get_bootstrap()
         except Exception as exc:
@@ -174,26 +172,50 @@ async def optimize_squad(
             }
             players.append(player)
 
-            # Base prediction: 0.5*form + 0.5*ppg (form regression)
-            form = float(el.get("form") or 0)
-            ppg = float(el.get("points_per_game") or 0)
-            if form > 0 and ppg > 0:
-                pred = round(0.5 * form + 0.5 * ppg, 2)
-            elif form > 0:
-                pred = round(form, 2)
-            elif ppg > 0:
-                pred = round(ppg, 2)
-            else:
-                pred = 0.01
-
-            # Discount prediction for doubtful players (75% chance = 75% of pts)
-            if chance is not None and chance < 100:
-                pred = round(pred * (chance / 100), 2)
-
-            predictions[pid] = pred
+        # Use fixture-aware scoring for predictions
+        try:
+            scorer = get_fixture_scorer()
+            all_pids = [p["id"] for p in players]
+            scored = await scorer.score_squad(all_pids, request.gameweek)
+            for p in players:
+                pid = p["id"]
+                sp = scored.get(pid)
+                if sp and sp.final_score > 0:
+                    pred = sp.final_score
+                else:
+                    # Fallback to base form/ppg if scorer returns 0 (BGW)
+                    pred = 0.01
+                # Discount prediction for doubtful players
+                chance = p.get("chance_of_playing")
+                if chance is not None and chance < 100:
+                    pred = round(pred * (chance / 100), 2)
+                predictions[pid] = pred
+        except Exception as exc:
+            logger.warning(
+                "Fixture-aware scoring failed, falling back to form/ppg: %s", exc
+            )
+            # Fallback: raw form/ppg predictions
+            for el in raw_elements:
+                pid = el.get("id")
+                if pid not in {p["id"] for p in players}:
+                    continue
+                form = float(el.get("form") or 0)
+                ppg = float(el.get("points_per_game") or 0)
+                if form > 0 and ppg > 0:
+                    pred = round(0.5 * form + 0.5 * ppg, 2)
+                elif form > 0:
+                    pred = round(form, 2)
+                elif ppg > 0:
+                    pred = round(ppg, 2)
+                else:
+                    pred = 0.01
+                chance = el.get("chance_of_playing_next_round")
+                if chance is not None and chance < 100:
+                    pred = round(pred * (chance / 100), 2)
+                predictions[pid] = pred
 
         logger.info(
-            "Auto-fetched %d eligible players from FPL API", len(players)
+            "Auto-fetched %d eligible players from FPL API (fixture-aware)", len(players)
         )
 
     budget = request.budget / 10.0  # 0.1m units -> real money
@@ -231,29 +253,14 @@ async def optimize_squad(
 
     # --- Enrich squad players with next-GW fixture info (post-processing) ---
     try:
-        from app.data.fpl_client import get_fpl_client
-
-        client = get_fpl_client()
+        client = _fpl_client_module.get_fpl_client()
         current_gw = await client.get_current_gameweek()
         next_gw = min(current_gw + 1, 38)
         next_fixtures = await client.get_typed_fixtures(next_gw)
         teams_map = await client.get_teams_map()
 
-        # Build DGW-aware fixture lookup: team_id -> list of fixture dicts
-        fixture_lookup: dict[int, list[dict]] = {}
-        for fix in next_fixtures:
-            # Home team entry
-            fixture_lookup.setdefault(fix.team_h, []).append({
-                "opponent_name": teams_map.get(fix.team_a, f"Team {fix.team_a}"),
-                "is_home": True,
-                "fdr": fix.team_h_difficulty,
-            })
-            # Away team entry
-            fixture_lookup.setdefault(fix.team_a, []).append({
-                "opponent_name": teams_map.get(fix.team_h, f"Team {fix.team_h}"),
-                "is_home": False,
-                "fdr": fix.team_a_difficulty,
-            })
+        # Build DGW-aware fixture lookup using canonical helper
+        fixture_lookup = build_fixture_lookup(next_fixtures, teams_map)
 
         # Enrich each squad player with fixture data
         for player in response.squad:
@@ -314,8 +321,7 @@ async def select_captain(request: CaptainRequest) -> CaptainResponse:
 
     # Resolve gameweek (default to next unfinished GW)
     if request.gameweek is None:
-        from app.data.fpl_client import get_fpl_client
-        client = get_fpl_client()
+        client = _fpl_client_module.get_fpl_client()
         gw = await client.get_current_gameweek()
         gameweek = min(gw + 1, 38)
     else:
@@ -331,24 +337,40 @@ async def select_captain(request: CaptainRequest) -> CaptainResponse:
         raise HTTPException(status_code=404, detail="No players found for given IDs")
 
     # Fetch teams map for display names
-    from app.data.fpl_client import get_fpl_client
-    client = get_fpl_client()
+    client = _fpl_client_module.get_fpl_client()
     teams_name_map = await client.get_teams_map()
+
+    # Determine effective mode (backward-compat: differential=True maps to "differential")
+    effective_mode = request.mode
+    if request.differential and effective_mode == "safe":
+        effective_mode = "differential"
+
+    # Fetch ownership data only when needed
+    player_map: dict = {}
+    if effective_mode == "differential":
+        all_players = await client.get_players()
+        player_map = {p.id: p for p in all_players}
+
+    # Variance factor by position for aggressive mode
+    _VARIANCE_FACTOR: dict[str, float] = {"FWD": 1.3, "MID": 1.2, "DEF": 1.0, "GKP": 0.9}
 
     # Build rankings
     rankings: list[CaptainRanking] = []
     for pid, sp in scores.items():
-        effective_score = sp.final_score
-        # Differential mode: penalize high ownership
-        if request.differential:
-            # Fetch player ownership
-            all_players = await client.get_players()
-            player_map = {p.id: p for p in all_players}
+        ownership = 0.0
+        ceiling_score = 0.0
+
+        if effective_mode == "differential":
             player = player_map.get(pid)
             ownership = player.selected_by_percent if player else 0.0
             effective_score = sp.final_score * (1 - ownership / 200)
+        elif effective_mode == "aggressive":
+            variance_factor = _VARIANCE_FACTOR.get(sp.position, 1.0)
+            ceiling_score = sp.final_score * variance_factor
+            effective_score = ceiling_score
         else:
-            ownership = 0.0
+            # "safe" (default): rank by expected points, no ownership penalty
+            effective_score = sp.final_score
 
         # Build opponent string from first fixture
         opponent_str = ""
@@ -375,6 +397,7 @@ async def select_captain(request: CaptainRequest) -> CaptainResponse:
             opponent=opponent_str,
             fdr=fdr_val,
             reasoning=reasoning,
+            ceiling_score=round(ceiling_score, 2),
         ))
 
     # Sort by predicted points descending
@@ -404,8 +427,7 @@ async def optimize_bench(request: BenchOrderRequest) -> BenchOrderResponse:
 
     # Resolve gameweek
     if request.gameweek is None:
-        from app.data.fpl_client import get_fpl_client
-        client = get_fpl_client()
+        client = _fpl_client_module.get_fpl_client()
         gw = await client.get_current_gameweek()
         gameweek = min(gw + 1, 38)
     else:
@@ -419,8 +441,7 @@ async def optimize_bench(request: BenchOrderRequest) -> BenchOrderResponse:
         raise HTTPException(status_code=502, detail=f"Scoring failed: {exc}")
 
     # Fetch teams map for opponent display
-    from app.data.fpl_client import get_fpl_client
-    client = get_fpl_client()
+    client = _fpl_client_module.get_fpl_client()
     teams_name_map = await client.get_teams_map()
 
     # Separate GKP from outfield bench players

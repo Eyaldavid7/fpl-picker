@@ -1,21 +1,18 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // Allow read/write only on the savedTeams collection with basic validation
-    match /savedTeams/{teamId} {
+    match /teams/{teamId} {
       allow read: if true;
-
-      allow create: if request.resource.data.keys().hasAny(['teamName', 'players'])
+      allow create: if request.resource.data.keys().hasAll(['name', 'playerIds'])
+                    && request.resource.data.name is string
+                    && request.resource.data.playerIds is list
                     && request.resource.data.size() <= 20;
-
-      allow update: if request.resource.data.keys().hasAny(['teamName', 'players'])
+      allow update: if request.resource.data.keys().hasAll(['name', 'playerIds'])
+                    && request.resource.data.name is string
+                    && request.resource.data.playerIds is list
                     && request.resource.data.size() <= 20;
-
-      allow delete: if true;
+      allow delete: if false;
     }
-
-    // Deny everything else by default (Firestore default, made explicit)
     match /{document=**} {
       allow read, write: if false;
     }

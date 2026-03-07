@@ -1,4 +1,5 @@
 import type { Position } from "@/types";
+import FDRBadge from "@/components/FDRBadge";
 
 interface PlayerCardProps {
   name: string;
@@ -10,6 +11,8 @@ interface PlayerCardProps {
   isViceCaptain?: boolean;
   compact?: boolean;
   onClick?: () => void;
+  nextOpponent?: string | null;
+  fdr?: number | null;
 }
 
 const positionColors: Record<Position, { bg: string; text: string; border: string }> = {
@@ -36,6 +39,8 @@ export default function PlayerCard({
   isViceCaptain = false,
   compact = false,
   onClick,
+  nextOpponent,
+  fdr,
 }: PlayerCardProps) {
   const colors = positionColors[position];
 
@@ -67,6 +72,14 @@ export default function PlayerCard({
           <span className="text-xs font-semibold text-[var(--primary)]">
             {predictedPoints.toFixed(1)}pts
           </span>
+        )}
+        {nextOpponent && fdr != null && (
+          <FDRBadge
+            difficulty={fdr}
+            opponentShortName={nextOpponent.replace(/\s*\([HA]\)\s*$/, "").trim().substring(0, 3)}
+            isHome={nextOpponent.includes("(H)")}
+            compact
+          />
         )}
       </div>
     );
@@ -112,11 +125,21 @@ export default function PlayerCard({
         <span className="text-[var(--muted-foreground)]">
           {(price / 10).toFixed(1)}m
         </span>
-        {predictedPoints !== undefined && (
-          <span className="font-semibold text-[var(--primary)]">
-            {predictedPoints.toFixed(1)} pts
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {nextOpponent && fdr != null && (
+            <FDRBadge
+              difficulty={fdr}
+              opponentShortName={nextOpponent.replace(/\s*\([HA]\)\s*$/, "").trim().substring(0, 3)}
+              isHome={nextOpponent.includes("(H)")}
+              compact
+            />
+          )}
+          {predictedPoints !== undefined && (
+            <span className="font-semibold text-[var(--primary)]">
+              {predictedPoints.toFixed(1)} pts
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

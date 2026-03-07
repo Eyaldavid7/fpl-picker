@@ -239,19 +239,23 @@ async def batch_predict(request: BatchPredictRequest) -> BatchPredictResponse:
 
 
 # ---------------------------------------------------------------------------
-# POST /api/predict/backtest  (stub -- retained for future implementation)
+# POST /api/predict/backtest
 # ---------------------------------------------------------------------------
 
 @router.post("/backtest", response_model=BacktestResponse)
 async def run_backtest(request: BacktestRequest) -> BacktestResponse:
     """Run backtest of a model over historical gameweeks."""
-    # Full backtesting requires downloading historical data; this is a
-    # placeholder that returns zeros until the backtest pipeline is wired up.
-    return BacktestResponse(
-        model=request.model,
-        gw_start=request.gw_start,
-        gw_end=request.gw_end,
-        mae=0.0,
-        cumulative_points=0.0,
-        results=[],
-    )
+    if request.gw_start > request.gw_end:
+        raise HTTPException(status_code=400, detail="gw_start must be <= gw_end")
+    if request.gw_end - request.gw_start > 10:
+        raise HTTPException(status_code=400, detail="Maximum backtest range is 10 gameweeks")
+
+    from app.prediction.backtester import Backtester
+
+    try:
+        backtester = Backtester()
+        result = await backtester.run_backtest(request.model, request.gw_start, request.gw_end)
+        return BacktestResponse(**result)
+    except Exception as exc:
+        logger.error("Backtest failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Backtest failed: {exc}")
