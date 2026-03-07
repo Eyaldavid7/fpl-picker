@@ -14,8 +14,6 @@ import {
   CheckCircle2,
   Save,
   Hash,
-  Star,
-  ShieldCheck,
 } from "lucide-react";
 import PitchView from "@/components/PitchView";
 import PlayerCard from "@/components/PlayerCard";
@@ -43,8 +41,6 @@ import type {
   TeamIdImportResult,
   SquadPlayer,
   SquadFixturesResponse,
-  CaptainResponse,
-  BenchOrderResponse,
 } from "@/types";
 
 const formations = [
@@ -329,6 +325,23 @@ export default function OptimizerPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importedPlayerIds]);
+
+  // Auto-trigger bench optimizer when team ID import data arrives (has XI/bench split)
+  useEffect(() => {
+    let xiIds: number[] = [];
+    let benchIds: number[] = [];
+    if (teamDisplayOverride) {
+      xiIds = teamDisplayOverride.startingXi;
+      benchIds = teamDisplayOverride.bench;
+    } else if (teamIdImport.data) {
+      xiIds = teamIdImport.data.starting_xi;
+      benchIds = teamIdImport.data.bench;
+    }
+    if (xiIds.length > 0 && benchIds.length > 0) {
+      benchOptimizer.mutate({ xi_ids: xiIds, bench_ids: benchIds });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamIdImport.data, teamDisplayOverride]);
 
   // Restore last squad from localStorage on mount (no API call)
   useEffect(() => {
@@ -895,116 +908,6 @@ export default function OptimizerPage() {
         </>
       )}
 
-      {/* Captain Picker - shown when data is available */}
-      {captainPicker.data && !captainPicker.isPending && (
-        <div className="fpl-card animate-fade-in">
-          <div className="flex items-center gap-2 mb-4">
-            <Star className="h-5 w-5 text-[var(--primary)]" />
-            <h2 className="text-lg font-semibold">Captain Picker</h2>
-          </div>
-
-          {/* Top pick */}
-          {captainPicker.data.rankings.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-              <div className="rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/5 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--primary)] mb-1">Captain</p>
-                <p className="font-bold text-lg">{captainPicker.data.rankings[0].web_name}</p>
-                <div className="flex items-center gap-2 mt-1 text-xs text-[var(--muted-foreground)]">
-                  <span className={`fpl-badge fpl-badge-${captainPicker.data.rankings[0].position.toLowerCase()}`}>
-                    {captainPicker.data.rankings[0].position}
-                  </span>
-                  <span>{captainPicker.data.rankings[0].team_name}</span>
-                  {captainPicker.data.rankings[0].opponent && <span>vs {captainPicker.data.rankings[0].opponent}</span>}
-                </div>
-                <p className="text-sm font-bold text-[var(--primary)] mt-2">
-                  {captainPicker.data.captain_xpts.toFixed(1)} xPts
-                </p>
-              </div>
-              {captainPicker.data.rankings.length > 1 && (
-                <div className="rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/5 p-4">
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--accent)] mb-1">Vice Captain</p>
-                  <p className="font-bold text-lg">{captainPicker.data.rankings[1].web_name}</p>
-                  <div className="flex items-center gap-2 mt-1 text-xs text-[var(--muted-foreground)]">
-                    <span className={`fpl-badge fpl-badge-${captainPicker.data.rankings[1].position.toLowerCase()}`}>
-                      {captainPicker.data.rankings[1].position}
-                    </span>
-                    <span>{captainPicker.data.rankings[1].team_name}</span>
-                    {captainPicker.data.rankings[1].opponent && <span>vs {captainPicker.data.rankings[1].opponent}</span>}
-                  </div>
-                  <p className="text-sm font-bold text-[var(--accent)] mt-2">
-                    {captainPicker.data.vice_captain_xpts.toFixed(1)} xPts
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Full rankings table */}
-          {captainPicker.data.rankings.length > 2 && (
-            <div className="overflow-x-auto">
-              <table className="fpl-table">
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>Player</th>
-                    <th>Pos</th>
-                    <th>Team</th>
-                    <th>Opponent</th>
-                    <th>xPts</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {captainPicker.data.rankings.slice(0, 8).map((r, idx) => (
-                    <tr key={r.player_id} className={idx < 2 ? "bg-[var(--primary)]/5" : ""}>
-                      <td className="font-bold text-[var(--muted-foreground)]">{idx + 1}</td>
-                      <td className="font-medium">{r.web_name}</td>
-                      <td>
-                        <span className={`fpl-badge fpl-badge-${r.position.toLowerCase()}`}>
-                          {r.position}
-                        </span>
-                      </td>
-                      <td className="text-[var(--muted-foreground)]">{r.team_name}</td>
-                      <td className="text-[var(--muted-foreground)]">{r.opponent || "--"}</td>
-                      <td className="text-[var(--primary)] font-semibold">{r.predicted_points.toFixed(1)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Bench Optimizer - shown when data is available */}
-      {benchOptimizer.data && !benchOptimizer.isPending && benchOptimizer.data.bench_players.length > 0 && (
-        <div className="fpl-card animate-fade-in">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="h-5 w-5 text-[var(--accent)]" />
-              <h2 className="text-lg font-semibold">Optimal Bench Order</h2>
-            </div>
-            <span className="text-xs text-[var(--muted-foreground)]">
-              Expected auto-sub: <span className="font-semibold text-[var(--accent)]">{benchOptimizer.data.expected_auto_sub_points.toFixed(2)} pts</span>
-            </span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {benchOptimizer.data.bench_players.map((bp, idx) => (
-              <div key={bp.player_id} className="rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-[var(--muted)] text-[10px] font-bold text-[var(--muted-foreground)]">
-                    {idx + 1}
-                  </span>
-                  <span className={`fpl-badge fpl-badge-${bp.position.toLowerCase()}`}>{bp.position}</span>
-                </div>
-                <p className="font-semibold truncate">{bp.web_name}</p>
-                <p className="text-xs text-[var(--muted-foreground)] mt-0.5">{bp.opponent || "No fixture"}</p>
-                <p className="text-sm font-bold text-[var(--accent)] mt-1">{bp.final_score.toFixed(1)} xPts</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Team Suggestions - shown when squad data is available */}
       {hasSquadData && (
         <TeamSuggestions
@@ -1014,6 +917,10 @@ export default function OptimizerPage() {
           transfersLoading={transferSuggestions.isPending}
           onFetchTransfers={handleFetchTransfers}
           teamBank={teamIdImport.data?.bank}
+          captainData={captainPicker.data}
+          captainLoading={captainPicker.isPending}
+          benchData={benchOptimizer.data}
+          benchLoading={benchOptimizer.isPending}
         />
       )}
 
